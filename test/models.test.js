@@ -16,6 +16,15 @@ test('email/password user records validate', async () => {
   await assert.doesNotReject(user.validate());
 });
 
+test('profile about text is limited to 240 characters', async () => {
+  const user = new User({
+    username: 'about_user', displayName: 'About User',
+    email: 'about@example.com', passwordHash: 'stored-hash',
+    about: 'a'.repeat(241)
+  });
+  await assert.rejects(user.validate());
+});
+
 test('message validation accepts text-only and attachment-only messages', async () => {
   const textMessage = new Message({ ...ids(), text: 'Existing text message', clientMessageId: 'message-text-1' });
   const fileMessage = new Message({

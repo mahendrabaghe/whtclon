@@ -7,7 +7,10 @@ import { authenticateToken, issueToken } from './auth.js';
 import { Conversation, Invitation, Message, User } from './models.js';
 import { findValidInvitation, hashInviteToken, requireMember } from './security.js';
 import { notifyConversationMemberLeft } from './socket.js';
-import { createDownloadUrl, createUploadUrl, deleteStoredAttachments, isStorageConfigured } from './uploads.js';
+import {
+  createDownloadUrl, createProfileImageUploadUrl, createUploadUrl, deleteStoredAttachments,
+  isStorageConfigured, completeProfileImageUpload
+} from './uploads.js';
 import { allowedAttachmentTypes, sanitizeFileName } from './validation.js';
 
 export const api = Router();
@@ -17,9 +20,13 @@ const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
 const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const profileImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const maxProfileImageBytes = 5 * 1024 * 1024;
 const publicUser = (user) => ({
   _id: String(user._id), username: user.username, displayName: user.displayName,
-  email: user.email, avatarUrl: user.avatarUrl, lastSeenAt: user.lastSeenAt
+  email: user.email, about: user.about || '', avatarUrl: user.avatarUrl,
+  hasAvatar: Boolean(user.avatarKey), avatarVersion: user.updatedAt?.getTime?.() || 0,
+  lastSeenAt: user.lastSeenAt
 });
 const accountUser = publicUser;
 
@@ -59,12 +66,23 @@ api.post('/auth/login', authLimit, asyncHandler(async (req, res) => {
   return res.json({ token: issueToken(user), user: accountUser(user) });
 }));
 
+api.get('/avatars/:userId', asyncHandler(async (req, res) => {
+  if (!/^[a-f\d]{24}$/i.test(req.params.userId)) return res.status(404).end();
+  const user = await User.findById(req.params.userId).select('+avatarKey');
+  if (!user?.avatarKey) return res.status(404).end();
+  const url = await createDownloadUrl({
+    key: user.avatarKey, fileName: 'connectx-profile-image', contentType: user.avatarContentType || 'image/jpeg'
+  });
+  res.set('Cache-Control', 'public, max-age=240');
+  return res.redirect(302, url);
+}));
+
 api.use(authenticateToken);
 
 api.get('/auth/me', (req, res) => res.json({ user: accountUser(req.user) }));
 
 api.patch('/profile', asyncHandler(async (req, res) => {
-  const { displayName, avatarUrl } = req.body || {};
+  const { displayName, about, avatarUrl } = req.body || {};
   const update = {};
   if (displayName !== undefined) {
     if (typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 60) {
@@ -72,17 +90,81 @@ api.patch('/profile', asyncHandler(async (req, res) => {
     }
     update.displayName = displayName.trim();
   }
+  if (about !== undefined) {
+    if (typeof about !== 'string' || about.trim().length > 240) {
+      return res.status(400).json({ error: 'About must be 240 characters or fewer.' });
+    }
+    update.about = about.trim();
+  }
   if (avatarUrl !== undefined) {
     if (typeof avatarUrl !== 'string' || avatarUrl.length > 2048 ||
         (avatarUrl && !/^https:\/\//i.test(avatarUrl))) {
       return res.status(400).json({ error: 'Profile picture must be an HTTPS URL.' });
     }
     update.avatarUrl = avatarUrl;
+    update.avatarKey = '';
+    update.avatarContentType = 'image/jpeg';
   }
   if (!Object.keys(update).length) return res.status(400).json({ error: 'No profile changes provided.' });
+  const previousAvatarKey = req.user.get('avatarKey');
   Object.assign(req.user, update);
   await req.user.save();
-  return res.json({ user: accountUser(req.user) });
+  let cleanupWarning = false;
+  if (update.avatarKey === '' && previousAvatarKey) {
+    try {
+      await deleteStoredAttachments([previousAvatarKey]);
+    } catch (error) {
+      cleanupWarning = true;
+      console.error(`Profile image cleanup failed (${error.name || 'Error'}).`);
+    }
+  }
+  return res.json({ user: accountUser(req.user), cleanupWarning });
+}));
+
+api.post('/profile/avatar-upload', uploadLimit, asyncHandler(async (req, res) => {
+  if (!isStorageConfigured()) {
+    return res.status(503).json({ error: 'Profile picture uploads are not configured. Set the Cloudflare R2 environment variables on the server.' });
+  }
+  const { contentType, size } = req.body || {};
+  if (!profileImageTypes.has(contentType) || !Number.isSafeInteger(size) ||
+      size < 1 || size > maxProfileImageBytes) {
+    return res.status(400).json({ error: 'Choose a JPEG, PNG, or WebP profile picture up to 5 MB.' });
+  }
+  const upload = await createProfileImageUploadUrl({
+    userId: req.user.id, contentType, size
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.status(201).json({ ...upload, contentType, size });
+}));
+
+api.post('/profile/avatar', asyncHandler(async (req, res) => {
+  const { key, contentType, size, displayName, about } = req.body || {};
+  if (!profileImageTypes.has(contentType) || !Number.isSafeInteger(size) ||
+      size < 1 || size > maxProfileImageBytes) {
+    return res.status(400).json({ error: 'Choose a JPEG, PNG, or WebP profile picture up to 5 MB.' });
+  }
+  if (typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 60 ||
+      typeof about !== 'string' || about.trim().length > 240) {
+    return res.status(400).json({ error: 'Enter a display name up to 60 characters and an about line up to 240 characters.' });
+  }
+  const verifiedKey = await completeProfileImageUpload({ key, userId: req.user.id, contentType, size });
+  const previousAvatarKey = req.user.get('avatarKey');
+  req.user.avatarKey = verifiedKey;
+  req.user.avatarUrl = '';
+  req.user.displayName = displayName.trim();
+  req.user.about = about.trim();
+  req.user.avatarContentType = contentType;
+  await req.user.save();
+  let cleanupWarning = false;
+  if (previousAvatarKey && previousAvatarKey !== verifiedKey) {
+    try {
+      await deleteStoredAttachments([previousAvatarKey]);
+    } catch (error) {
+      cleanupWarning = true;
+      console.error(`Profile image cleanup failed (${error.name || 'Error'}).`);
+    }
+  }
+  return res.json({ user: accountUser(req.user), cleanupWarning });
 }));
 
 api.get('/ice-servers', (req, res) => {
@@ -98,7 +180,8 @@ api.get('/ice-servers', (req, res) => {
 api.get('/invitations/:token', asyncHandler(async (req, res) => {
   const invitation = await findValidInvitation(req.params.token);
   if (!invitation) return res.status(404).json({ error: 'Invitation is invalid, expired, or revoked.' });
-  const conversation = await Conversation.findById(invitation.conversationId).populate('participantIds', 'displayName username avatarUrl');
+  const conversation = await Conversation.findById(invitation.conversationId)
+    .populate('participantIds', 'displayName username avatarUrl avatarKey avatarContentType about updatedAt');
   if (!conversation || conversation.participantIds.length >= 2) return res.status(410).json({ error: 'This invitation can no longer be used.' });
   return res.json({ valid: true, createdBy: publicUser(conversation.participantIds.find((user) => String(user._id) === String(invitation.createdBy)) || conversation.participantIds[0]) });
 }));
@@ -159,7 +242,8 @@ api.post('/conversations/:id/invitations', asyncHandler(async (req, res) => {
 
 api.get('/conversations', asyncHandler(async (req, res) => {
   const conversations = await Conversation.find({ participantIds: req.user._id })
-    .sort({ lastMessageAt: -1 }).populate('participantIds', 'displayName username avatarUrl lastSeenAt');
+    .sort({ lastMessageAt: -1 })
+    .populate('participantIds', 'displayName username avatarUrl avatarKey avatarContentType about lastSeenAt updatedAt');
   const conversationIds = conversations.map((conversation) => conversation._id);
   const unreadFilters = conversations.map((conversation) => ({
     conversationId: conversation._id,

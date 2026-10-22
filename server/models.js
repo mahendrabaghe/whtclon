@@ -3,9 +3,12 @@ import mongoose from 'mongoose';
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, trim: true, lowercase: true, minlength: 3, maxlength: 24 },
   displayName: { type: String, required: true, trim: true, maxlength: 60 },
+  about: { type: String, default: '', trim: true, maxlength: 240 },
   email: { type: String, required: true, unique: true, trim: true, lowercase: true, maxlength: 254 },
   passwordHash: { type: String, required: true, select: false },
   avatarUrl: { type: String, default: '', maxlength: 2048 },
+  avatarKey: { type: String, default: '', maxlength: 200 },
+  avatarContentType: { type: String, default: 'image/jpeg', maxlength: 40 },
   lastSeenAt: { type: Date, default: Date.now }
 }, { timestamps: true, toJSON: { transform: (_doc, ret) => { delete ret.passwordHash; delete ret.__v; return ret; } } });
 

@@ -31,6 +31,48 @@ export async function createUploadUrl({ conversationId, userId, contentType, siz
   };
 }
 
+export async function createProfileImageUploadUrl({ userId, contentType, size }) {
+  if (!client) throw new Error('Profile picture uploads require Cloudflare R2 storage configuration.');
+  const uploadId = crypto.randomUUID();
+  const key = `pending/avatars/${userId}/${uploadId}`;
+  const command = new PutObjectCommand({
+    Bucket: bucket, Key: key, ContentType: contentType, ContentLength: size
+  });
+  return {
+    key,
+    uploadUrl: await getSignedUrl(client, command, {
+      expiresIn: 300, signableHeaders: new Set(['content-type'])
+    }),
+    headers: { 'Content-Type': contentType },
+    expiresIn: 300
+  };
+}
+
+export async function completeProfileImageUpload({ key, userId, contentType, size }) {
+  if (!client) throw new Error('Profile picture uploads require Cloudflare R2 storage configuration.');
+  const safeUserId = String(userId);
+  const keyPattern = new RegExp(`^pending/avatars/${safeUserId}/([a-f\\d-]{36})$`, 'i');
+  if (!keyPattern.test(key)) {
+    const error = new Error('Profile picture upload is invalid or expired.');
+    error.status = 400;
+    throw error;
+  }
+  const result = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+  if (result.ContentLength !== size || result.ContentType !== contentType) {
+    const error = new Error('The uploaded profile picture did not pass validation.');
+    error.status = 400;
+    throw error;
+  }
+  const uploadId = key.slice(key.lastIndexOf('/') + 1);
+  const storedKey = `avatars/${safeUserId}/${uploadId}`;
+  const copySource = `${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
+  await client.send(new CopyObjectCommand({
+    Bucket: bucket, Key: storedKey, CopySource: copySource
+  }));
+  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  return storedKey;
+}
+
 function attachmentKeys({ conversationId, userId, attachmentId }) {
   // The key binds every upload to its authenticated owner and conversation.
   return {

@@ -1,6 +1,8 @@
 const API = (window.CONNECTX_API_URL || '').replace(/\/$/, '');
 const root = document.getElementById('app');
 const callDialog = document.getElementById('call-dialog');
+const joinDialog = document.getElementById('join-dialog');
+const profileDialog = document.getElementById('profile-dialog');
 const tokenKey = 'connectx.session';
 const state = {
   token: sessionStorage.getItem(tokenKey),
@@ -27,6 +29,9 @@ const state = {
 let socketClientPromise;
 let attachmentObserver;
 let attachmentLoadQueue = new WeakMap();
+let profilePreviewUrl;
+let profileInitialAvatarUrl = '';
+let profileAvatarRemoveRequested = false;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -51,15 +56,211 @@ const iconPaths = {
   switch: '<path d="m17 3 4 4-4 4M3 7h18M7 21l-4-4 4-4m14 4H3"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.7-1l-1.7.7-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.7-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.7 1.4 2.4-1.4 1.1a8 8 0 0 1 0 2Z"/>',
-  logout: '<path d="M10 17l5-5-5-5m5 5H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/>'
+  logout: '<path d="M10 17l5-5-5-5m5 5H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/>',
+  system: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
+  close: '<path d="m18 6-12 12M6 6l12 12"/>'
 };
 const icon = (name, className = '') => `<svg class="icon-svg ${className}" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${iconPaths[name]}</svg>`;
+const inviteTokenPattern = /^[A-Za-z0-9_-]{40,100}$/;
 const formatTime = (date) => new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(date));
 const formatDate = (date) => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(date));
 const activeConversation = () => state.conversations.find((conversation) => conversation._id === state.activeId);
 const otherPerson = (conversation) => conversation?.other ||
   conversation?.participantIds?.find((person) => person._id !== state.user?._id) || null;
 const inviteFromUrl = () => new URLSearchParams(location.search).get('invite');
+
+function parseInvitationInput(value) {
+  const input = value.trim();
+  if (!input) return { error: 'Paste an invitation link or code to continue.' };
+  if (inviteTokenPattern.test(input)) return { token: input };
+
+  let url;
+  try {
+    url = new URL(input, location.href);
+  } catch {
+    return { error: 'That doesn’t look like a valid invitation link or code.' };
+  }
+  const currentPath = location.pathname.replace(/\/+$/, '');
+  const inputPath = url.pathname.replace(/\/+$/, '');
+  if (!['http:', 'https:'].includes(url.protocol) || url.origin !== location.origin || inputPath !== currentPath) {
+    return { error: 'Use a ConnectX invitation link for this site.' };
+  }
+  const token = url.searchParams.get('invite');
+  if (!token || !inviteTokenPattern.test(token)) {
+    return { error: 'This link is missing a valid invitation code.' };
+  }
+  return { token };
+}
+
+function updateJoinFeedback(message = '', error = false, keepValid = false) {
+  const feedback = document.getElementById('join-feedback');
+  const input = document.getElementById('join-input');
+  const indicator = document.getElementById('join-valid-indicator');
+  const submit = document.getElementById('join-submit');
+  if (!feedback || !input || !indicator || !submit) return;
+  const parsed = parseInvitationInput(input.value);
+  if (!message && input.value.trim() && parsed.error) {
+    message = parsed.error;
+    error = true;
+  }
+  feedback.textContent = message;
+  feedback.classList.toggle('error', error);
+  input.setAttribute('aria-invalid', String(error && !keepValid));
+  const valid = Boolean(parsed.token);
+  indicator.classList.toggle('visible', valid);
+  submit.disabled = Boolean(joinDialog.dataset.joining);
+}
+
+function openJoinDialog() {
+  const input = document.getElementById('join-input');
+  const submit = document.getElementById('join-submit');
+  input.value = '';
+  submit.disabled = true;
+  updateJoinFeedback();
+  joinDialog.showModal();
+  input.focus();
+}
+
+function closeJoinDialog() {
+  if (joinDialog.open && !joinDialog.dataset.joining) joinDialog.close();
+}
+
+function applyThemeMode(mode) {
+  window.connectXTheme?.setMode(mode);
+  updateThemeButton();
+}
+
+function updateThemeButton() {
+  const button = document.getElementById('theme-toggle');
+  if (!button) return;
+  const mode = window.connectXTheme?.getMode() || 'system';
+  const labels = { system: 'System default', light: 'Light mode', dark: 'Dark mode' };
+  const nextMode = { system: 'light', light: 'dark', dark: 'system' }[mode];
+  const icons = { system: 'system', light: 'sun', dark: 'moon' };
+  button.innerHTML = icon(icons[mode]);
+  button.title = `Theme: ${labels[mode]}. Switch to ${labels[nextMode]}.`;
+  button.setAttribute('aria-label', button.title);
+}
+
+function cycleTheme() {
+  const mode = window.connectXTheme?.getMode() || 'system';
+  applyThemeMode({ system: 'light', light: 'dark', dark: 'system' }[mode]);
+}
+
+function bindDialogControls() {
+  const joinInput = document.getElementById('join-input');
+  joinInput.addEventListener('input', () => updateJoinFeedback());
+  document.getElementById('join-paste').addEventListener('click', async () => {
+    try {
+      if (!navigator.clipboard?.readText) throw new Error('Clipboard access is unavailable.');
+      const clipboardText = await navigator.clipboard.readText();
+      if (!clipboardText.trim()) {
+        updateJoinFeedback('Your clipboard is empty. Paste a link with Ctrl+V or Command+V.', true, true);
+        joinInput.focus();
+        return;
+      }
+      joinInput.value = clipboardText.trim();
+      updateJoinFeedback();
+      joinInput.focus();
+    } catch {
+      updateJoinFeedback('Clipboard access was blocked. Click the field and paste with Ctrl+V or Command+V.', true, true);
+      joinInput.focus();
+    }
+  });
+  document.getElementById('join-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (joinDialog.dataset.joining) return;
+    const parsed = parseInvitationInput(joinInput.value);
+    if (!parsed.token) {
+      updateJoinFeedback(parsed.error, true);
+      return;
+    }
+    const submit = document.getElementById('join-submit');
+    const cancel = document.getElementById('join-cancel');
+    const paste = document.getElementById('join-paste');
+    joinDialog.dataset.joining = 'true';
+    submit.disabled = true;
+    cancel.disabled = true;
+    paste.disabled = true;
+    document.getElementById('join-close').disabled = true;
+    submit.textContent = 'Joining…';
+    updateJoinFeedback('Connecting to your conversation…');
+    const result = await joinInvitation(parsed.token, false);
+    delete joinDialog.dataset.joining;
+    cancel.disabled = false;
+    paste.disabled = false;
+    document.getElementById('join-close').disabled = false;
+    submit.textContent = 'Join conversation';
+    submit.disabled = false;
+    if (result.ok) {
+      joinDialog.close();
+      return;
+    }
+    updateJoinFeedback(result.error, true, true);
+  });
+  document.getElementById('join-close').addEventListener('click', closeJoinDialog);
+  document.getElementById('join-cancel').addEventListener('click', closeJoinDialog);
+  joinDialog.addEventListener('cancel', (event) => {
+    if (joinDialog.dataset.joining) event.preventDefault();
+  });
+  joinDialog.addEventListener('click', (event) => {
+    if (event.target === joinDialog) closeJoinDialog();
+  });
+  joinDialog.addEventListener('close', () => {
+    if (!joinDialog.dataset.joining) {
+      joinInput.value = '';
+      updateJoinFeedback();
+    }
+  });
+  document.getElementById('profile-close').addEventListener('click', () => profileDialog.close());
+  document.getElementById('profile-cancel').addEventListener('click', () => profileDialog.close());
+  document.getElementById('profile-avatar-file').addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0];
+    const feedback = document.getElementById('profile-feedback');
+    feedback.textContent = '';
+    feedback.classList.remove('error');
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      event.currentTarget.value = '';
+      feedback.textContent = 'Choose a JPEG, PNG, or WebP image up to 5 MB.';
+      feedback.classList.add('error');
+      return;
+    }
+    if (profilePreviewUrl) URL.revokeObjectURL(profilePreviewUrl);
+    profilePreviewUrl = URL.createObjectURL(file);
+    document.getElementById('profile-avatar-remove').disabled = false;
+    const image = document.createElement('img');
+    image.className = 'avatar profile-preview-avatar';
+    image.src = profilePreviewUrl;
+    image.alt = 'Selected profile picture preview';
+    document.getElementById('profile-avatar-preview').replaceChildren(image);
+  });
+  document.getElementById('profile-avatar-remove').addEventListener('click', () => {
+    document.getElementById('profile-avatar-file').value = '';
+    document.getElementById('profile-avatar-url').value = '';
+    profileAvatarRemoveRequested = true;
+    document.getElementById('profile-avatar-remove').disabled = true;
+    if (profilePreviewUrl) URL.revokeObjectURL(profilePreviewUrl);
+    profilePreviewUrl = null;
+    document.getElementById('profile-avatar-preview').innerHTML =
+      avatarMarkup({ ...state.user, avatarUrl: '', hasAvatar: false }, 'profile-preview-avatar');
+  });
+  document.getElementById('profile-avatar-url').addEventListener('input', (event) => {
+    document.getElementById('profile-avatar-remove').disabled =
+      !event.currentTarget.value.trim() && !state.user.avatarUrl && !state.user.hasAvatar;
+  });
+  document.getElementById('profile-form').addEventListener('submit', editProfile);
+  profileDialog.addEventListener('close', () => {
+    if (profilePreviewUrl) URL.revokeObjectURL(profilePreviewUrl);
+    profilePreviewUrl = null;
+  });
+  profileDialog.addEventListener('click', (event) => {
+    if (event.target === profileDialog) profileDialog.close();
+  });
+}
 
 function notify(message, error = false) {
   const region = document.getElementById('toast-region');
@@ -137,6 +338,10 @@ function renderAuth(register = false) {
 }
 
 function avatarMarkup(person, sizeClass = '') {
+  if (person?.hasAvatar && person?._id) {
+    const avatarUrl = `${API}/api/avatars/${encodeURIComponent(person._id)}?v=${encodeURIComponent(person.avatarVersion || 0)}`;
+    return `<img class="avatar ${sizeClass}" src="${escapeHtml(avatarUrl)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
+  }
   if (person?.avatarUrl && /^https:\/\//i.test(person.avatarUrl)) {
     return `<img class="avatar ${sizeClass}" src="${escapeHtml(person.avatarUrl)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
   }
@@ -165,13 +370,13 @@ function renderShell(announce = false) {
         </div>
         <div class="side-actions">
           <button class="button primary" id="new-chat" type="button">${icon('plus')} New chat</button>
-          <button class="button secondary" id="join-chat" type="button">Join code</button>
+          <button class="button secondary" id="join-chat" type="button">${icon('link')} Join</button>
         </div>
-        <div class="section-label">RECENT CHATS</div>
+        <div class="chat-list-heading"><h2 class="section-label">CHATS</h2><button class="icon-button theme-toggle" id="theme-toggle" type="button"></button></div>
         <div class="chat-list" id="chat-list">${chatItemsMarkup(visible)}</div>
         <div class="profile-row">
           ${avatarMarkup(state.user)}
-          <span class="profile-copy"><strong>${escapeHtml(state.user.displayName)}</strong><small>@${escapeHtml(state.user.username)}</small></span>
+          <span class="profile-copy"><strong>${escapeHtml(state.user.displayName)}</strong><small>@${escapeHtml(state.user.username)}</small>${state.user.about ? `<small class="profile-about-preview">${escapeHtml(state.user.about)}</small>` : ''}</span>
           <button class="icon-button" id="edit-profile" type="button" aria-label="Edit profile" title="Edit profile">${icon('settings')}</button>
           <button class="icon-button" id="sign-out" type="button" aria-label="Sign out" title="Sign out">${icon('logout')}</button>
         </div>
@@ -181,7 +386,9 @@ function renderShell(announce = false) {
   document.getElementById('conversation-search').addEventListener('input', () => renderChatList());
   document.getElementById('new-chat').addEventListener('click', createConversation);
   document.getElementById('join-chat').addEventListener('click', joinByCode);
-  document.getElementById('edit-profile').addEventListener('click', editProfile);
+  document.getElementById('theme-toggle').addEventListener('click', cycleTheme);
+  updateThemeButton();
+  document.getElementById('edit-profile').addEventListener('click', openProfileDialog);
   document.getElementById('sign-out').addEventListener('click', signOut);
   document.querySelector('[data-home]')?.addEventListener('click', (event) => {
     event.preventDefault();
@@ -238,7 +445,7 @@ function renderChatPanel(announce = false) {
     <header class="chat-header">
       <button class="icon-button back-button" id="back-to-list" type="button" aria-label="Back to chats">${icon('arrowLeft')}</button>
       <span data-peer-avatar>${avatarMarkup(person)}</span>
-      <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span></div>
+      <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span>${person?.about ? `<small class="chat-about">${escapeHtml(person.about)}</small>` : ''}</div>
       <div class="header-actions">
         <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>${icon('share')}</button>
         <button class="icon-button call-action audio-action" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>${icon('headset')}</button>
@@ -632,6 +839,17 @@ function updateActiveChatHeader() {
     info.querySelector('span').textContent = person
       ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`)
       : 'Share an invitation to get started';
+    let about = info.querySelector('.chat-about');
+    if (person?.about) {
+      if (!about) {
+        about = document.createElement('small');
+        about.className = 'chat-about';
+        info.append(about);
+      }
+      about.textContent = person.about;
+    } else {
+      about?.remove();
+    }
   }
   document.title = person ? `${person.displayName} | ConnectX` : 'ConnectX — Stay close';
   const shareButton = document.getElementById('share-invite');
@@ -694,16 +912,10 @@ async function revokeInvitation() {
 }
 
 async function joinByCode() {
-  const code = prompt('Paste an invitation code or full ConnectX invite link:');
-  if (!code) return;
-  let inviteToken = code.trim();
-  try {
-    inviteToken = new URL(inviteToken).searchParams.get('invite') || inviteToken;
-  } catch { /* A raw invitation token was supplied. */ }
-  await joinInvitation(inviteToken);
+  openJoinDialog();
 }
 
-async function joinInvitation(token) {
+async function joinInvitation(token, notifyFailure = true) {
   try {
     const result = await request('/conversations/join', {
       method: 'POST', body: JSON.stringify({ token })
@@ -712,7 +924,11 @@ async function joinInvitation(token) {
     await refreshConversations({ render: false });
     await openConversation(result.conversationId, true);
     notify('You joined the conversation.');
-  } catch (error) { notify(error.message, true); }
+    return { ok: true };
+  } catch (error) {
+    if (notifyFailure) notify(error.message, true);
+    return { ok: false, error: error.message };
+  }
 }
 
 async function leaveConversation() {
@@ -727,21 +943,88 @@ async function leaveConversation() {
   } catch (error) { notify(error.message, true); }
 }
 
-async function editProfile() {
-  const displayName = prompt('Display name:', state.user.displayName);
-  if (displayName === null) return;
-  const avatarUrl = prompt('Profile picture HTTPS URL (leave blank to clear):', state.user.avatarUrl || '');
-  if (avatarUrl === null) return;
-  try {
-    const data = await request('/profile', {
-      method: 'PATCH', body: JSON.stringify({ displayName, avatarUrl })
-    });
-    state.user = data.user;
-    renderShell();
-    notify('Profile updated.');
-  } catch (error) {
-    notify(error.message, true);
+function openProfileDialog() {
+  document.getElementById('profile-display-name').value = state.user.displayName || '';
+  document.getElementById('profile-about').value = state.user.about || '';
+  document.getElementById('profile-avatar-url').value = state.user.avatarUrl || '';
+  profileInitialAvatarUrl = state.user.avatarUrl || '';
+  profileAvatarRemoveRequested = false;
+  document.getElementById('profile-avatar-remove').disabled =
+    !state.user.avatarUrl && !state.user.hasAvatar;
+  document.getElementById('profile-avatar-file').value = '';
+  document.getElementById('profile-avatar-preview').innerHTML = avatarMarkup(state.user, 'profile-preview-avatar');
+  if (profilePreviewUrl) URL.revokeObjectURL(profilePreviewUrl);
+  profilePreviewUrl = null;
+  const feedback = document.getElementById('profile-feedback');
+  feedback.textContent = '';
+  feedback.classList.remove('error');
+  profileDialog.showModal();
+  document.getElementById('profile-display-name').focus();
+}
+
+async function editProfile(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = document.getElementById('profile-save');
+  const feedback = document.getElementById('profile-feedback');
+  const originalLabel = submit.textContent;
+  const displayName = document.getElementById('profile-display-name').value.trim();
+  const about = document.getElementById('profile-about').value.trim();
+  const avatarUrl = document.getElementById('profile-avatar-url').value.trim();
+  const avatarFile = document.getElementById('profile-avatar-file').files?.[0];
+  if (!displayName || displayName.length > 60) {
+    feedback.textContent = 'Display name must be between 1 and 60 characters.';
+    feedback.classList.add('error');
+    document.getElementById('profile-display-name').focus();
     return;
+  }
+  if (about.length > 240) {
+    feedback.textContent = 'About must be 240 characters or fewer.';
+    feedback.classList.add('error');
+    document.getElementById('profile-about').focus();
+    return;
+  }
+  submit.disabled = true;
+  submit.textContent = 'Saving…';
+  feedback.textContent = '';
+  feedback.classList.remove('error');
+  try {
+    let data;
+    if (avatarFile) {
+      const upload = await request('/profile/avatar-upload', {
+        method: 'POST', body: JSON.stringify({ contentType: avatarFile.type, size: avatarFile.size })
+      });
+      const uploaded = await fetch(upload.uploadUrl, {
+        method: 'PUT', headers: upload.headers, body: avatarFile
+      });
+      if (!uploaded.ok) throw new Error('Could not upload the profile picture. Please try again.');
+      data = await request('/profile/avatar', {
+        method: 'POST',
+        body: JSON.stringify({ key: upload.key, contentType: avatarFile.type, size: avatarFile.size, displayName, about })
+      });
+    } else {
+      const profileUpdate = { displayName, about };
+      if (profileAvatarRemoveRequested || avatarUrl !== profileInitialAvatarUrl) {
+        profileUpdate.avatarUrl = avatarUrl;
+      }
+      data = await request('/profile', {
+        method: 'PATCH', body: JSON.stringify(profileUpdate)
+      });
+    }
+    state.user = data.user;
+    profileDialog.close();
+    renderShell();
+    notify(data.cleanupWarning
+      ? 'Profile updated, but an old profile image could not be removed.'
+      : 'Profile updated.');
+  } catch (error) {
+    feedback.textContent = error.message;
+    feedback.classList.add('error');
+  } finally {
+    if (form.isConnected) {
+      submit.disabled = false;
+      submit.textContent = originalLabel;
+    }
   }
 }
 
@@ -1339,4 +1622,5 @@ async function boot() {
   await startApp();
 }
 
+bindDialogControls();
 boot();

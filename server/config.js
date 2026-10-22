@@ -16,6 +16,12 @@ const numeric = (name, fallback, min, max) => {
   return value;
 };
 
+const r2Values = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME'];
+const configuredR2Values = r2Values.filter((name) => process.env[name]);
+if (configuredR2Values.length && configuredR2Values.length !== r2Values.length) {
+  throw new Error(`Set all Cloudflare R2 variables together: ${r2Values.join(', ')}.`);
+}
+
 export const config = Object.freeze({
   port: numeric('PORT', 3000, 1, 65535),
   mongoUri: process.env.MONGODB_URI,
@@ -27,7 +33,16 @@ export const config = Object.freeze({
   maxMessageLength: numeric('MAX_MESSAGE_LENGTH', 4000, 1, 20000),
   turnUrls: (process.env.TURN_URLS || '').split(',').map((url) => url.trim()).filter(Boolean),
   turnSecret: process.env.TURN_SECRET || '',
-  turnCredentialTtlSeconds: numeric('TURN_CREDENTIAL_TTL_SECONDS', 3600, 60, 86400)
+  turnCredentialTtlSeconds: numeric('TURN_CREDENTIAL_TTL_SECONDS', 3600, 60, 86400),
+  msg91AuthKey: process.env.MSG91_AUTH_KEY || '',
+  msg91TemplateId: process.env.MSG91_TEMPLATE_ID || '',
+  msg91OtpLength: numeric('MSG91_OTP_LENGTH', 6, 4, 8),
+  msg91OtpExpiryMinutes: numeric('MSG91_OTP_EXPIRY_MINUTES', 5, 1, 60),
+  r2AccountId: process.env.R2_ACCOUNT_ID || '',
+  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+  r2BucketName: process.env.R2_BUCKET_NAME || '',
+  maxUploadSizeBytes: numeric('MAX_UPLOAD_SIZE_BYTES', 26214400, 1, 26214400)
 });
 if (config.turnUrls.some((url) => !/^turns?:/i.test(url))) {
   throw new Error('TURN_URLS entries must use the turn: or turns: scheme.');

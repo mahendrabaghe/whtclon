@@ -5,6 +5,8 @@ const userSchema = new mongoose.Schema({
   displayName: { type: String, required: true, trim: true, maxlength: 60 },
   email: { type: String, required: true, unique: true, trim: true, lowercase: true, maxlength: 254 },
   passwordHash: { type: String, required: true, select: false },
+  phoneNumber: { type: String, unique: true, sparse: true, trim: true },
+  phoneVerifiedAt: { type: Date, default: null },
   avatarUrl: { type: String, default: '', maxlength: 2048 },
   lastSeenAt: { type: Date, default: Date.now }
 }, { timestamps: true, toJSON: { transform: (_doc, ret) => { delete ret.passwordHash; delete ret.__v; return ret; } } });
@@ -27,10 +29,22 @@ const invitationSchema = new mongoose.Schema({
 }, { timestamps: true });
 invitationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
+const attachmentSchema = new mongoose.Schema({
+  attachmentId: { type: String, required: true, maxlength: 36 },
+  fileName: { type: String, required: true, maxlength: 180 },
+  contentType: { type: String, required: true, maxlength: 120 },
+  size: { type: Number, required: true, min: 1 },
+  key: { type: String, required: true, maxlength: 500 }
+}, { _id: false });
+
 const messageSchema = new mongoose.Schema({
   conversationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
   senderId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  text: { type: String, required: true, maxlength: 20000 },
+  text: {
+    type: String, default: '', maxlength: 20000,
+    validate: { validator(value) { return Boolean(value.trim()) || Boolean(this.attachments?.length) || Boolean(this.deletedAt); }, message: 'A message must contain text or an attachment.' }
+  },
+  attachments: { type: [attachmentSchema], default: [] },
   clientMessageId: { type: String, required: true, maxlength: 80 },
   readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   deletedAt: { type: Date, default: null }

@@ -3,6 +3,8 @@ import { verifySocketToken } from './auth.js';
 import { config } from './config.js';
 import { Conversation, Message } from './models.js';
 import { idString, requireMember } from './security.js';
+import { storeUploadedAttachment } from './uploads.js';
+import { allowedAttachmentTypes, sanitizeFileName } from './validation.js';
 
 const userRoom = (id) => `user:${id}`;
 const messageWindows = new Map();
@@ -123,21 +125,50 @@ export function configureSocket(server) {
         recent.push(now);
         messageWindows.set(userId, recent);
         const { conversationId, text, clientMessageId } = data;
-        if (typeof text !== 'string' || !text.trim() || text.length > config.maxMessageLength) {
-          return ack({ ok: false, error: `Message must be 1-${config.maxMessageLength} characters.` });
+        const normalizedText = typeof text === 'string' ? text.trim() : '';
+        const requestedAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+        if (normalizedText.length > config.maxMessageLength || requestedAttachments.length > 5 ||
+            (!normalizedText && !requestedAttachments.length)) {
+          return ack({ ok: false, error: `Enter a message up to ${config.maxMessageLength} characters or attach up to 5 files.` });
         }
         if (typeof clientMessageId !== 'string' || !/^[\w-]{8,80}$/.test(clientMessageId)) {
           return ack({ ok: false, error: 'Invalid message identifier.' });
         }
         const conversation = await requireMember(conversationId, userId);
         const canonicalConversationId = idString(conversation._id);
+        const attachmentDetails = requestedAttachments.map((attachment) => ({
+          attachmentId: attachment?.attachmentId,
+          fileName: sanitizeFileName(attachment?.fileName),
+          contentType: attachment?.contentType,
+          size: attachment?.size
+        }));
+        if (new Set(attachmentDetails.map((attachment) => attachment.attachmentId)).size !== attachmentDetails.length ||
+            attachmentDetails.some((attachment) =>
+          typeof attachment.attachmentId !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(attachment.attachmentId) ||
+          !attachment.fileName || !allowedAttachmentTypes.has(attachment.contentType) ||
+          !Number.isSafeInteger(attachment.size) || attachment.size < 1 || attachment.size > config.maxUploadSizeBytes
+        )) {
+          return ack({ ok: false, error: 'One or more attachments are invalid.' });
+        }
         let message;
         let created = true;
         try {
+          const attachments = await Promise.all(attachmentDetails.map(async (attachment) => ({
+            ...attachment,
+            key: await storeUploadedAttachment({
+              conversationId: canonicalConversationId,
+              userId,
+              attachmentId: attachment.attachmentId,
+              contentType: attachment.contentType,
+              size: attachment.size
+            })
+          })));
           message = await Message.create({
             conversationId: canonicalConversationId,
             senderId: socket.user._id,
-            text: text.trim(),
+            text: normalizedText,
+            attachments,
             clientMessageId,
             readBy: [socket.user._id]
           });
@@ -146,7 +177,14 @@ export function configureSocket(server) {
           message = await Message.findOne({ senderId: socket.user._id, clientMessageId });
           created = false;
           if (!message || idString(message.conversationId) !== idString(conversation._id) ||
-              (!message.deletedAt && message.text !== text.trim())) {
+              (!message.deletedAt && (message.text !== normalizedText ||
+                message.attachments.length !== attachmentDetails.length ||
+                message.attachments.some((attachment) => !attachmentDetails.some((candidate) =>
+                  candidate.attachmentId === attachment.attachmentId &&
+                  candidate.fileName === attachment.fileName &&
+                  candidate.contentType === attachment.contentType &&
+                  candidate.size === attachment.size
+                ))))) {
             return ack({ ok: false, error: 'Message identifier has already been used.' });
           }
         }
@@ -161,6 +199,9 @@ export function configureSocket(server) {
           conversationId: canonicalConversationId,
           sender: { _id: userId, displayName: socket.user.displayName, username: socket.user.username },
           text: message.deletedAt ? '' : message.text,
+          attachments: message.deletedAt ? [] : message.attachments.map(({ attachmentId, fileName, contentType, size }) => ({
+            attachmentId, fileName, contentType, size
+          })),
           createdAt: message.createdAt,
           clientMessageId,
           readBy: message.readBy.map(idString)
@@ -194,11 +235,10 @@ export function configureSocket(server) {
       try {
         const conversation = await requireMember(conversationId, userId);
         const canonicalConversationId = idString(conversation._id);
-        const message = await Message.findOneAndUpdate(
-          { _id: messageId, conversationId: canonicalConversationId, senderId: socket.user._id },
-          { $set: { text: '', deletedAt: new Date() } },
-          { new: true }
-        );
+        const message = await Message.findOne({
+          _id: messageId, conversationId: canonicalConversationId,
+          senderId: socket.user._id, deletedAt: { $ne: null }
+        });
         if (message) io.to(`conversation:${canonicalConversationId}`).emit('message:deleted', {
           conversationId: canonicalConversationId, messageId: idString(message._id), deletedAt: message.deletedAt
         });

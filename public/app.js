@@ -25,6 +25,8 @@ const state = {
   pendingAnnouncement: null
 };
 let socketClientPromise;
+let attachmentObserver;
+let attachmentLoadQueue = new WeakMap();
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -60,27 +62,134 @@ async function request(path, options = {}) {
   return data;
 }
 
-function renderAuth(register = false) {
-  document.title = register ? 'Create account | ConnectX' : 'Sign in | ConnectX';
+function renderAuth(register = false, method = 'email') {
+  document.title = method === 'phone' ? 'Phone verification | ConnectX' : (register ? 'Create account | ConnectX' : 'Sign in | ConnectX');
   const inviteToken = inviteFromUrl();
+  let otpSent = false;
+  let countdownTimer;
   root.innerHTML = `
     <section class="auth-wrap">
       <form class="auth-card" id="auth-form">
         <a class="brand-link" href="./" aria-label="ConnectX home"><span class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></span></a>
-        <h2>${register ? 'Create your account' : 'Welcome back'}</h2>
-        <p>${register ? 'A more personal way to stay close, wherever life takes you.' : 'Sign in to pick up right where you left off.'}</p>
+        <h2>${method === 'phone' ? (register ? 'Create an account with your phone' : 'Sign in with your phone') : (register ? 'Create your account' : 'Welcome back')}</h2>
+        <p>${method === 'phone' ? 'We will send a one-time verification code to your mobile number.' : (register ? 'A more personal way to stay close, wherever life takes you.' : 'Sign in to pick up right where you left off.')}</p>
         ${inviteToken ? '<div class="invite-card">You have a private chat invitation. Sign in or create an account to join.</div>' : ''}
+        <div class="auth-methods" role="group" aria-label="Sign-in method">
+          <button class="auth-method${method === 'email' ? ' selected' : ''}" id="email-method" type="button" aria-pressed="${method === 'email'}">Email &amp; password</button>
+          <button class="auth-method${method === 'phone' ? ' selected' : ''}" id="phone-method" type="button" aria-pressed="${method === 'phone'}">Phone &amp; OTP</button>
+        </div>
         ${register ? `<div class="field"><label for="display-name">Display name</label><input id="display-name" name="displayName" maxlength="60" required autocomplete="name"></div>
           <div class="field"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required autocomplete="username"></div>` : ''}
-        <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email"></div>
-        <div class="field"><label for="password">Password${register ? ' (10+ characters)' : ''}</label><input id="password" name="password" type="password" minlength="${register ? 10 : 1}" maxlength="128" required autocomplete="${register ? 'new-password' : 'current-password'}"></div>
-        <button class="button primary" type="submit">${register ? 'Create account' : 'Sign in'}</button>
+        ${method === 'phone' ? `
+          ${register ? '<div class="field"><label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email"></div>' : ''}
+          <div class="field"><label for="country-code">Country code</label>
+            <select id="country-code" name="countryCode">
+              <option value="+91" selected>India (+91)</option><option value="+1">United States / Canada (+1)</option>
+              <option value="+44">United Kingdom (+44)</option><option value="+61">Australia (+61)</option>
+              <option value="+880">Bangladesh (+880)</option><option value="+49">Germany (+49)</option>
+              <option value="+33">France (+33)</option><option value="+977">Nepal (+977)</option>
+              <option value="+92">Pakistan (+92)</option><option value="+65">Singapore (+65)</option>
+              <option value="+27">South Africa (+27)</option><option value="+971">United Arab Emirates (+971)</option>
+              <option value="+234">Nigeria (+234)</option><option value="+81">Japan (+81)</option>
+              <option value="other">Other (enter full international number)</option>
+            </select>
+          </div>
+          <div class="field"><label for="phone-number">Mobile number</label><input id="phone-number" type="tel" inputmode="tel" maxlength="16" required autocomplete="tel-national" placeholder="9876543210"></div>
+          <div id="otp-step" hidden>
+            <div class="field"><label for="otp-code">Verification code</label><input id="otp-code" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" maxlength="8"></div>
+            <div class="otp-actions"><span id="otp-countdown" aria-live="polite"></span><button class="link-button" id="resend-otp" type="button" disabled>Resend code</button><button class="link-button" id="change-phone" type="button">Change number</button></div>
+          </div>
+        ` : `
+          <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email"></div>
+          <div class="field"><label for="password">Password${register ? ' (10+ characters)' : ''}</label><input id="password" name="password" type="password" minlength="${register ? 10 : 1}" maxlength="128" required autocomplete="${register ? 'new-password' : 'current-password'}"></div>
+        `}
+        <button class="button primary" type="submit">${method === 'phone' ? 'Send verification code' : (register ? 'Create account' : 'Sign in')}</button>
         <p class="auth-switch">${register ? 'Already have an account?' : 'New to ConnectX?'}
           <button class="link-button" type="button" id="toggle-auth">${register ? 'Sign in' : 'Create account'}</button>
         </p>
       </form>
     </section>`;
-  document.getElementById('toggle-auth').addEventListener('click', () => renderAuth(!register));
+  document.getElementById('toggle-auth').addEventListener('click', () => {
+    clearInterval(countdownTimer);
+    renderAuth(!register, method);
+  });
+  document.getElementById('email-method').addEventListener('click', () => {
+    clearInterval(countdownTimer);
+    renderAuth(register, 'email');
+  });
+  document.getElementById('phone-method').addEventListener('click', () => {
+    clearInterval(countdownTimer);
+    renderAuth(register, 'phone');
+  });
+
+  if (method === 'phone') {
+    const phoneInput = document.getElementById('phone-number');
+    const countryCode = document.getElementById('country-code');
+    const otpStep = document.getElementById('otp-step');
+    const otpInput = document.getElementById('otp-code');
+    const resendButton = document.getElementById('resend-otp');
+    const countdown = document.getElementById('otp-countdown');
+    const submitButton = document.querySelector('#auth-form [type="submit"]');
+    const phoneValue = () => countryCode.value === 'other'
+      ? phoneInput.value.replace(/[\s()-]/g, '')
+      : `${countryCode.value}${phoneInput.value.replace(/\D/g, '')}`;
+    countryCode.addEventListener('change', () => {
+      phoneInput.placeholder = countryCode.value === 'other' ? '+919876543210' : '9876543210';
+    });
+    const startCountdown = () => {
+      clearInterval(countdownTimer);
+      let seconds = 30;
+      resendButton.disabled = true;
+      countdown.textContent = `You can request another code in ${seconds}s.`;
+      countdownTimer = setInterval(() => {
+        seconds--;
+        countdown.textContent = seconds > 0 ? `You can request another code in ${seconds}s.` : '';
+        if (seconds <= 0) {
+          clearInterval(countdownTimer);
+          resendButton.disabled = false;
+        }
+      }, 1000);
+    };
+    const sendCode = async () => {
+      await request('/auth/phone/send-otp', {
+        method: 'POST', body: JSON.stringify({ phoneNumber: phoneValue() })
+      });
+      otpSent = true;
+      phoneInput.disabled = true;
+      countryCode.disabled = true;
+      otpInput.required = true;
+      otpStep.hidden = false;
+      submitButton.textContent = register ? 'Verify and create account' : 'Verify and sign in';
+      notify('Verification code sent.');
+      startCountdown();
+      otpInput.focus();
+    };
+    document.getElementById('change-phone').addEventListener('click', () => {
+      clearInterval(countdownTimer);
+      otpSent = false;
+      otpInput.value = '';
+      otpInput.required = false;
+      otpStep.hidden = true;
+      phoneInput.disabled = false;
+      countryCode.disabled = false;
+      submitButton.textContent = 'Send verification code';
+      phoneInput.focus();
+    });
+    resendButton.addEventListener('click', async () => {
+      resendButton.disabled = true;
+      try {
+        await request('/auth/phone/send-otp', {
+          method: 'POST', body: JSON.stringify({ phoneNumber: phoneValue() })
+        });
+        notify('A new verification code was sent.');
+        startCountdown();
+      } catch (error) {
+        notify(error.message, true);
+        resendButton.disabled = false;
+      }
+    });
+  }
+
   document.getElementById('auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -88,16 +197,43 @@ function renderAuth(register = false) {
     if (submitButton.disabled) return;
     const originalLabel = submitButton.textContent;
     submitButton.disabled = true;
-    submitButton.textContent = register ? 'Creating account…' : 'Signing in…';
+    submitButton.textContent = method === 'phone' ? (otpSent ? 'Verifying code…' : 'Sending code…') : (register ? 'Creating account…' : 'Signing in…');
     const form = new FormData(formElement);
     const body = Object.fromEntries(form.entries());
     try {
-      const result = await request(`/auth/${register ? 'register' : 'login'}`, {
-        method: 'POST', body: JSON.stringify(body)
-      });
+      let result;
+      if (method === 'phone') {
+        if (!otpSent) {
+          const countryCode = document.getElementById('country-code').value;
+          const phoneInput = document.getElementById('phone-number').value;
+          const phoneNumber = countryCode === 'other'
+            ? phoneInput.replace(/[\s()-]/g, '')
+            : `${countryCode}${phoneInput.replace(/\D/g, '')}`;
+          if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error('Enter a valid mobile number.');
+          await sendCode();
+          return;
+        }
+        const countryCode = document.getElementById('country-code').value;
+        const phoneInput = document.getElementById('phone-number').value;
+        const phoneNumber = countryCode === 'other'
+          ? phoneInput.replace(/[\s()-]/g, '')
+          : `${countryCode}${phoneInput.replace(/\D/g, '')}`;
+        result = await request('/auth/phone/verify', {
+          method: 'POST',
+          body: JSON.stringify({
+            phoneNumber, otp: body.otp, mode: register ? 'register' : 'login',
+            username: body.username, displayName: body.displayName, email: body.email
+          })
+        });
+      } else {
+        result = await request(`/auth/${register ? 'register' : 'login'}`, {
+          method: 'POST', body: JSON.stringify(body)
+        });
+      }
       state.token = result.token;
       state.user = result.user;
       sessionStorage.setItem(tokenKey, result.token);
+      clearInterval(countdownTimer);
       notify(register ? 'Your account is ready.' : 'Signed in successfully.');
       startApp();
     } catch (error) {
@@ -105,7 +241,9 @@ function renderAuth(register = false) {
     } finally {
       if (formElement.isConnected) {
         submitButton.disabled = false;
-        submitButton.textContent = originalLabel;
+        submitButton.textContent = method === 'phone' && otpSent
+          ? (register ? 'Verify and create account' : 'Verify and sign in')
+          : (method === 'phone' ? 'Send verification code' : originalLabel);
       }
     }
   });
@@ -119,6 +257,9 @@ function avatarMarkup(person, sizeClass = '') {
 }
 
 function renderShell(announce = false) {
+  attachmentObserver?.disconnect();
+  attachmentObserver = null;
+  attachmentLoadQueue = new WeakMap();
   const conversation = activeConversation();
   const person = otherPerson(conversation);
   document.title = person ? `${person.displayName} | ConnectX` : 'ConnectX — Stay close';
@@ -221,8 +362,11 @@ function renderChatPanel(announce = false) {
     </header>
     <div class="messages" id="messages" role="log" aria-label="Messages"></div>
     <div class="typing-indicator" id="typing-indicator">${escapeHtml(state.peerTyping)}</div>
+    <div class="upload-status" id="upload-status" aria-live="polite" hidden></div>
     <form class="composer" id="composer">
-      <button class="icon-button" id="attach-file" type="button" aria-label="Attach file" title="Share files (storage setup required)">＋</button>
+      <input id="attachment-picker" class="visually-hidden" type="file" multiple
+        accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,application/pdf,text/plain,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/zip">
+      <button class="icon-button" id="attach-file" type="button" aria-label="Attach file" title="Share files">＋</button>
       <textarea id="message-input" rows="1" maxlength="4000" placeholder="Write a message…" aria-label="Message"></textarea>
       <button class="send-button" type="submit" aria-label="Send message">➤</button>
     </form>
@@ -237,7 +381,26 @@ function renderChatPanel(announce = false) {
   document.getElementById('video-call').addEventListener('click', () => startCall('video'));
   document.getElementById('leave-chat').addEventListener('click', leaveConversation);
   document.getElementById('revoke-invite')?.addEventListener('click', revokeInvitation);
-  document.getElementById('attach-file').addEventListener('click', () => notify('File sharing is unavailable until persistent storage is configured.', true));
+  const picker = document.getElementById('attachment-picker');
+  document.getElementById('attach-file').addEventListener('click', () => picker.click());
+  picker.addEventListener('change', () => {
+    if (picker.files?.length) void uploadFiles([...picker.files], conversation._id);
+    picker.value = '';
+  });
+  panel.addEventListener('dragover', (event) => {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    panel.classList.add('drag-over');
+  });
+  panel.addEventListener('dragleave', (event) => {
+    if (!panel.contains(event.relatedTarget)) panel.classList.remove('drag-over');
+  });
+  panel.addEventListener('drop', (event) => {
+    if (!event.dataTransfer?.files.length) return;
+    event.preventDefault();
+    panel.classList.remove('drag-over');
+    void uploadFiles([...event.dataTransfer.files], conversation._id);
+  });
   document.getElementById('composer').addEventListener('submit', sendMessage);
   const input = document.getElementById('message-input');
   input.addEventListener('keydown', (event) => {
@@ -254,6 +417,169 @@ function renderChatPanel(announce = false) {
   return loadMessages(conversation._id, announce);
 }
 
+const maxClientUploadSize = 25 * 1024 * 1024;
+const allowedClientAttachmentTypes = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/webm',
+  'application/pdf', 'text/plain', 'text/csv', 'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/zip'
+]);
+
+function formatFileSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function makeUploadStatus(file) {
+  const region = document.getElementById('upload-status');
+  if (!region) return null;
+  region.hidden = false;
+  const item = document.createElement('div');
+  item.className = 'upload-progress';
+  const label = document.createElement('span');
+  label.textContent = `Uploading ${file.name}`;
+  const progress = document.createElement('progress');
+  progress.max = 100;
+  progress.value = 0;
+  item.append(label, progress);
+  region.append(item);
+  return { item, label, progress };
+}
+
+function putFile(uploadUrl, headers, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', uploadUrl);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Upload failed (HTTP ${xhr.status || 'network error'}). Check the storage bucket CORS settings and try again.`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('Upload failed. Check your connection and the storage bucket CORS settings.')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload was cancelled.')));
+    xhr.send(file);
+  });
+}
+
+async function uploadFiles(files, conversationId) {
+  if (files.length > 5) {
+    notify('Select no more than 5 files at a time.', true);
+    return;
+  }
+  for (const file of files) {
+    const progress = makeUploadStatus(file);
+    try {
+      if (!allowedClientAttachmentTypes.has(file.type) || file.size < 1 || file.size > maxClientUploadSize) {
+        throw new Error(`${file.name} is not a supported file or exceeds the 25 MB limit.`);
+      }
+      if (progress) progress.label.textContent = `Preparing ${file.name}`;
+      const upload = await request(`/conversations/${encodeURIComponent(conversationId)}/uploads`, {
+        method: 'POST',
+        body: JSON.stringify({ fileName: file.name, contentType: file.type, size: file.size })
+      });
+      if (progress) progress.label.textContent = `Uploading ${file.name}`;
+      await putFile(upload.uploadUrl, upload.headers, file, (value) => {
+        if (progress) progress.progress.value = value;
+      });
+      if (progress) progress.label.textContent = `Sending ${file.name}`;
+      const result = await socketEmitAck('message:send', {
+        conversationId,
+        text: '',
+        clientMessageId: crypto.randomUUID(),
+        attachments: [{
+          attachmentId: upload.attachmentId,
+          fileName: upload.fileName,
+          contentType: upload.contentType,
+          size: upload.size
+        }]
+      });
+      if (!result?.ok) throw new Error(result?.error || 'The file was uploaded but could not be sent.');
+      if (progress) {
+        progress.label.textContent = `Sent ${file.name}`;
+        progress.progress.value = 100;
+        setTimeout(() => {
+          progress.item.remove();
+          const region = document.getElementById('upload-status');
+          if (region && !region.children.length) region.hidden = true;
+        }, 3500);
+      }
+    } catch (error) {
+      if (progress) {
+        progress.label.textContent = `Could not send ${file.name}: ${error.message}`;
+        progress.item.classList.add('error');
+      }
+      notify(error.message, true);
+    }
+  }
+}
+
+function renderAttachment(message, attachment, bubble) {
+  const card = document.createElement('div');
+  card.className = 'message-attachment';
+  const name = document.createElement('span');
+  name.className = 'attachment-name';
+  name.textContent = attachment.fileName;
+  const details = document.createElement('span');
+  details.className = 'attachment-details';
+  details.textContent = `${attachment.contentType} · ${formatFileSize(attachment.size)}`;
+  const preview = document.createElement('div');
+  preview.className = 'attachment-preview';
+  const link = document.createElement('a');
+  link.textContent = 'Loading secure link…';
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.setAttribute('aria-label', `Download ${attachment.fileName}`);
+  card.append(name, details, preview, link);
+  bubble.append(card);
+  const load = () => request(`/conversations/${encodeURIComponent(message.conversationId)}/messages/${encodeURIComponent(message._id)}/attachments/${encodeURIComponent(attachment.attachmentId)}`)
+    .then(({ url, downloadUrl }) => {
+      link.href = downloadUrl;
+      link.textContent = 'Download';
+      if (attachment.contentType.startsWith('image/')) {
+        const image = document.createElement('img');
+        image.src = url;
+        image.alt = attachment.fileName;
+        image.loading = 'lazy';
+        image.decoding = 'async';
+        preview.append(image);
+      } else if (attachment.contentType.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = url;
+        video.controls = true;
+        video.preload = 'metadata';
+        video.setAttribute('aria-label', attachment.fileName);
+        preview.append(video);
+      }
+    })
+    .catch(() => {
+      link.textContent = 'Attachment unavailable';
+      link.removeAttribute('href');
+    });
+  if (!('IntersectionObserver' in window)) {
+    void load();
+  } else {
+    if (!attachmentObserver) {
+      attachmentObserver = new IntersectionObserver((entries, observer) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          observer.unobserve(entry.target);
+          const loadAttachment = attachmentLoadQueue.get(entry.target);
+          attachmentLoadQueue.delete(entry.target);
+          if (loadAttachment) void loadAttachment();
+        });
+      }, { rootMargin: '120px' });
+    }
+    attachmentLoadQueue.set(card, load);
+    attachmentObserver.observe(card);
+  }
+}
+
 function renderMessage(message, prepend = false) {
   const box = document.getElementById('messages');
   if (!box || box.querySelector(`[data-message-id="${CSS.escape(message._id)}"]`)) return;
@@ -264,7 +590,16 @@ function renderMessage(message, prepend = false) {
   row.dataset.createdAt = message.createdAt;
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = message.deleted ? 'Message deleted' : (message.text || '');
+  if (message.deleted) {
+    bubble.textContent = 'Message deleted';
+  } else {
+    if (message.text) {
+      const text = document.createElement('div');
+      text.textContent = message.text;
+      bubble.append(text);
+    }
+    (message.attachments || []).forEach((attachment) => renderAttachment(message, attachment, bubble));
+  }
   const meta = document.createElement('div');
   meta.className = 'message-meta';
   const time = document.createElement('span');
@@ -276,7 +611,7 @@ function renderMessage(message, prepend = false) {
     status.className = 'message-status';
     meta.append(status);
   }
-  if (!message.deleted) {
+  if (!message.deleted && message.text) {
     const copyButton = document.createElement('button');
     copyButton.type = 'button';
     copyButton.className = 'copy-message';
@@ -298,16 +633,27 @@ function renderMessage(message, prepend = false) {
       event.preventDefault();
       if (!confirm('Delete this message for everyone?')) return;
       try {
-        await request(`/conversations/${state.activeId}/messages/${message._id}`, { method: 'DELETE' });
+        const result = await request(`/conversations/${state.activeId}/messages/${message._id}`, { method: 'DELETE' });
         message.text = '';
+        message.attachments = [];
         message.deleted = true;
-        bubble.firstChild.textContent = 'Message deleted';
+        markMessageDeleted(message._id);
         socketEmit('message:delete', { conversationId: state.activeId, messageId: message._id });
+        if (result.cleanupWarning) notify('Message deleted, but stored files could not be removed. Please contact support.', true);
       } catch (error) { notify(error.message, true); }
     });
   }
   row.append(bubble);
   if (prepend) box.prepend(row); else box.append(row);
+}
+
+function markMessageDeleted(messageId) {
+  const bubble = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"] .bubble`);
+  if (!bubble) return;
+  const meta = bubble.querySelector('.message-meta');
+  meta?.querySelector('.copy-message')?.remove();
+  bubble.replaceChildren(document.createTextNode('Message deleted'));
+  if (meta) bubble.append(meta);
 }
 
 async function loadMessages(conversationId, announce = false) {
@@ -506,6 +852,27 @@ async function editProfile() {
     state.user = data.user;
     renderShell();
     notify('Profile updated.');
+    if (state.user.phoneNumber) return;
+  } catch (error) {
+    notify(error.message, true);
+    return;
+  }
+  if (state.user.phoneNumber) return;
+  const phoneNumber = prompt('Link a mobile number for OTP sign-in? Include the country code, for example +919876543210:');
+  if (phoneNumber === null || !phoneNumber.trim()) return;
+  const normalizedPhone = phoneNumber.trim().replace(/[\s()-]/g, '');
+  try {
+    await request('/profile/phone/send-otp', {
+      method: 'POST', body: JSON.stringify({ phoneNumber: normalizedPhone })
+    });
+    const otp = prompt(`Enter the verification code sent to ${normalizedPhone}:`);
+    if (otp === null) return;
+    const linked = await request('/profile/phone/verify', {
+      method: 'POST', body: JSON.stringify({ phoneNumber: normalizedPhone, otp: otp.trim() })
+    });
+    state.user = linked.user;
+    renderShell();
+    notify('Phone number verified and linked to your account.');
   } catch (error) { notify(error.message, true); }
 }
 
@@ -622,7 +989,7 @@ async function connectSocket() {
   state.socket.on('message:new', (message) => {
     const conversation = state.conversations.find((item) => item._id === message.conversationId);
     if (conversation) {
-      conversation.lastMessage = { text: message.text, createdAt: message.createdAt };
+      conversation.lastMessage = { text: message.text || (message.attachments?.length ? 'Attachment' : ''), createdAt: message.createdAt };
       conversation.lastMessageAt = message.createdAt;
       if (message.conversationId !== state.activeId && message.sender._id !== state.user._id) conversation.unreadCount++;
     }
@@ -644,9 +1011,7 @@ async function connectSocket() {
   });
   state.socket.on('message:deleted', ({ conversationId, messageId }) => {
     if (conversationId !== state.activeId) return;
-    const row = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
-    const text = row?.querySelector('.bubble')?.firstChild;
-    if (text) text.textContent = 'Message deleted';
+    markMessageDeleted(messageId);
   });
   state.socket.on('conversation:updated', async () => {
     try {

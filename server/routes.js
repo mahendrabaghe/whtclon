@@ -7,9 +7,17 @@ import { authenticateToken, issueToken } from './auth.js';
 import { Conversation, Invitation, Message, User } from './models.js';
 import { findValidInvitation, hashInviteToken, requireMember } from './security.js';
 import { notifyConversationMemberLeft } from './socket.js';
+import { sendPhoneOtp, verifyPhoneOtp } from './msg91.js';
+import { createDownloadUrl, createUploadUrl, deleteStoredAttachments, isStorageConfigured } from './uploads.js';
+import { allowedAttachmentTypes, isValidPhoneNumber, sanitizeFileName } from './validation.js';
 
 export const api = Router();
 const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
+const otpSendLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 3, standardHeaders: 'draft-7', legacyHeaders: false });
+const otpVerifyLimit = rateLimit({ windowMs: 10 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false });
+const uploadLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false });
+const phoneSendWindows = new Map();
+const phoneVerifyWindows = new Map();
 const asyncHandler = (handler) => (req, res, next) =>
   Promise.resolve(handler(req, res, next)).catch(next);
 const usernamePattern = /^[a-zA-Z0-9_]{3,24}$/;
@@ -18,6 +26,29 @@ const publicUser = (user) => ({
   _id: String(user._id), username: user.username, displayName: user.displayName,
   email: user.email, avatarUrl: user.avatarUrl, lastSeenAt: user.lastSeenAt
 });
+const accountUser = (user) => ({ ...publicUser(user), phoneNumber: user.phoneNumber || null });
+
+function phoneWindowLimit(windows, windowMs, limit, cooldownMs = 0) {
+  return (req, res, next) => {
+    const phoneNumber = req.body?.phoneNumber;
+    if (!isValidPhoneNumber(phoneNumber)) return next();
+    const now = Date.now();
+    const attempts = (windows.get(phoneNumber) || []).filter((at) => now - at < windowMs);
+    if (attempts.length >= limit || (cooldownMs && attempts.length && now - attempts.at(-1) < cooldownMs)) {
+      return res.status(429).json({ error: 'Too many verification requests for this number. Please wait before trying again.' });
+    }
+    attempts.push(now);
+    windows.set(phoneNumber, attempts);
+    if (windows.size > 1000) {
+      for (const [number, times] of windows) {
+        if (!times.some((at) => now - at < windowMs)) windows.delete(number);
+      }
+    }
+    return next();
+  };
+}
+const phoneSendLimit = phoneWindowLimit(phoneSendWindows, 60 * 60 * 1000, 5, 30 * 1000);
+const phoneVerifyLimit = phoneWindowLimit(phoneVerifyWindows, 10 * 60 * 1000, 8);
 
 api.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
@@ -32,7 +63,7 @@ api.post('/auth/register', authLimit, asyncHandler(async (req, res) => {
   try {
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({ username, displayName: displayName.trim(), email, passwordHash });
-    return res.status(201).json({ token: issueToken(user), user: publicUser(user) });
+    return res.status(201).json({ token: issueToken(user), user: accountUser(user) });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: 'That username or email is already registered.' });
     throw error;
@@ -48,12 +79,79 @@ api.post('/auth/login', authLimit, asyncHandler(async (req, res) => {
   if (!user || !await bcrypt.compare(password, user.passwordHash)) {
     return res.status(401).json({ error: 'Email or password is incorrect.' });
   }
-  return res.json({ token: issueToken(user), user: publicUser(user) });
+  return res.json({ token: issueToken(user), user: accountUser(user) });
+}));
+
+api.post('/auth/phone/send-otp', otpSendLimit, phoneSendLimit, asyncHandler(async (req, res) => {
+  const { phoneNumber } = req.body || {};
+  if (!isValidPhoneNumber(phoneNumber)) return res.status(400).json({ error: 'Enter a valid phone number in international format, such as +919876543210.' });
+  await sendPhoneOtp(phoneNumber);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ sent: true, message: 'Verification code sent.' });
+}));
+
+api.post('/auth/phone/verify', otpVerifyLimit, phoneVerifyLimit, asyncHandler(async (req, res) => {
+  const { phoneNumber, otp, mode, username, displayName, email } = req.body || {};
+  if (!isValidPhoneNumber(phoneNumber) || typeof otp !== 'string' ||
+      !new RegExp(`^\\d{${config.msg91OtpLength}}$`).test(otp) ||
+      !['login', 'register'].includes(mode)) {
+    return res.status(400).json({ error: 'Enter a valid phone number and verification code.' });
+  }
+  if (mode === 'register' &&
+      (typeof username !== 'string' || !usernamePattern.test(username) ||
+       typeof displayName !== 'string' || !displayName.trim() || displayName.trim().length > 60 ||
+       typeof email !== 'string' || !emailPattern.test(email) || email.length > 254)) {
+    return res.status(400).json({ error: 'Use a 3-24 character username, valid email, and display name up to 60 characters.' });
+  }
+  await verifyPhoneOtp(phoneNumber, otp);
+  if (mode === 'login') {
+    const user = await User.findOne({ phoneNumber });
+    if (!user) return res.status(404).json({ error: 'No account is linked to this phone number. Create an account first.' });
+    return res.json({ token: issueToken(user), user: accountUser(user) });
+  }
+  try {
+    const passwordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+    const user = await User.create({
+      username, displayName: displayName.trim(), email: email.trim().toLowerCase(),
+      passwordHash, phoneNumber, phoneVerifiedAt: new Date()
+    });
+    return res.status(201).json({ token: issueToken(user), user: accountUser(user) });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: 'That phone number, username, or email is already registered.' });
+    throw error;
+  }
 }));
 
 api.use(authenticateToken);
 
-api.get('/auth/me', (req, res) => res.json({ user: publicUser(req.user) }));
+api.get('/auth/me', (req, res) => res.json({ user: accountUser(req.user) }));
+
+api.post('/profile/phone/send-otp', otpSendLimit, phoneSendLimit, asyncHandler(async (req, res) => {
+  const { phoneNumber } = req.body || {};
+  if (!isValidPhoneNumber(phoneNumber)) return res.status(400).json({ error: 'Enter a valid phone number in international format, such as +919876543210.' });
+  if (req.user.phoneNumber === phoneNumber) return res.status(409).json({ error: 'That number is already linked to your account.' });
+  await sendPhoneOtp(phoneNumber);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ sent: true, message: 'Verification code sent.' });
+}));
+
+api.post('/profile/phone/verify', otpVerifyLimit, phoneVerifyLimit, asyncHandler(async (req, res) => {
+  const { phoneNumber, otp } = req.body || {};
+  if (!isValidPhoneNumber(phoneNumber) || typeof otp !== 'string' ||
+      !new RegExp(`^\\d{${config.msg91OtpLength}}$`).test(otp)) {
+    return res.status(400).json({ error: 'Enter a valid phone number and verification code.' });
+  }
+  await verifyPhoneOtp(phoneNumber, otp);
+  req.user.phoneNumber = phoneNumber;
+  req.user.phoneVerifiedAt = new Date();
+  try {
+    await req.user.save();
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ error: 'That phone number is already linked to another account.' });
+    throw error;
+  }
+  return res.json({ user: accountUser(req.user) });
+}));
 
 api.patch('/profile', asyncHandler(async (req, res) => {
   const { displayName, avatarUrl } = req.body || {};
@@ -74,7 +172,7 @@ api.patch('/profile', asyncHandler(async (req, res) => {
   if (!Object.keys(update).length) return res.status(400).json({ error: 'No profile changes provided.' });
   Object.assign(req.user, update);
   await req.user.save();
-  return res.json({ user: publicUser(req.user) });
+  return res.json({ user: accountUser(req.user) });
 }));
 
 api.get('/ice-servers', (req, res) => {
@@ -169,7 +267,7 @@ api.get('/conversations', asyncHandler(async (req, res) => {
             { $match: { $expr: { $eq: ['$conversationId', '$$conversationId'] } } },
             { $sort: { createdAt: -1, _id: -1 } },
             { $limit: 1 },
-            { $project: { text: 1, createdAt: 1, deletedAt: 1 } }
+            { $project: { text: 1, attachments: 1, createdAt: 1, deletedAt: 1 } }
           ],
           as: 'latestMessage'
         }
@@ -190,7 +288,7 @@ api.get('/conversations', asyncHandler(async (req, res) => {
       _id: String(conversation._id), participantIds: conversation.participantIds.map(publicUser),
       createdBy: String(conversation.createdBy),
       other: other ? publicUser(other) : null,
-      lastMessage: latest ? { text: latest.deletedAt ? 'Message deleted' : latest.text, createdAt: latest.createdAt } : null,
+      lastMessage: latest ? { text: latest.deletedAt ? 'Message deleted' : (latest.text || (latest.attachments?.length ? 'Attachment' : '')), createdAt: latest.createdAt } : null,
       lastMessageAt: conversation.lastMessageAt, unreadCount: unreadByConversation.get(String(conversation._id)) || 0
     };
   });
@@ -212,10 +310,13 @@ api.get('/conversations/:id/messages', asyncHandler(async (req, res) => {
       query.createdAt = { $lt: beforeAt };
     }
   }
-  const messages = await Message.find(query).sort({ createdAt: -1, _id: -1 }).limit(limit).select('conversationId senderId text createdAt readBy deletedAt').populate('senderId', 'displayName username');
+  const messages = await Message.find(query).sort({ createdAt: -1, _id: -1 }).limit(limit).select('conversationId senderId text attachments createdAt readBy deletedAt').populate('senderId', 'displayName username');
   return res.json({ messages: messages.reverse().map((message) => ({
     _id: String(message._id), conversationId: String(message.conversationId),
     sender: publicUser(message.senderId), text: message.deletedAt ? '' : message.text,
+    attachments: message.deletedAt ? [] : message.attachments.map(({ attachmentId, fileName, contentType, size }) => ({
+      attachmentId, fileName, contentType, size
+    })),
     createdAt: message.createdAt, readBy: message.readBy.map(String), deleted: Boolean(message.deletedAt)
   })), hasMore: messages.length === limit });
 }));
@@ -229,7 +330,16 @@ api.delete('/conversations/:id/messages/:messageId', asyncHandler(async (req, re
   message.text = '';
   message.deletedAt = new Date();
   await message.save();
-  return res.json({ deleted: true, messageId: String(message._id) });
+  let cleanupWarning = false;
+  if (message.attachments.length) {
+    try {
+      await deleteStoredAttachments(message.attachments.map((attachment) => attachment.key));
+    } catch (error) {
+      cleanupWarning = true;
+      console.error(`Deleted message file cleanup failed (${error.name || 'Error'}).`);
+    }
+  }
+  return res.json({ deleted: true, cleanupWarning, messageId: String(message._id) });
 }));
 
 api.post('/conversations/:id/leave', asyncHandler(async (req, res) => {
@@ -240,6 +350,36 @@ api.post('/conversations/:id/leave', asyncHandler(async (req, res) => {
   return res.json({ left: true });
 }));
 
-api.post('/uploads', (_req, res) => res.status(503).json({
-  error: 'File sharing is not configured. Set up persistent object storage before enabling uploads.'
+api.post('/conversations/:id/uploads', uploadLimit, asyncHandler(async (req, res) => {
+  if (!isStorageConfigured()) return res.status(503).json({ error: 'File sharing is not configured. Set the Cloudflare R2 environment variables on the server.' });
+  await requireMember(req.params.id, req.user._id);
+  const { fileName, contentType, size } = req.body || {};
+  const safeFileName = sanitizeFileName(fileName);
+  if (!safeFileName || !allowedAttachmentTypes.has(contentType) || !Number.isSafeInteger(size) ||
+      size < 1 || size > config.maxUploadSizeBytes) {
+    return res.status(400).json({ error: `Choose a supported file (up to ${Math.floor(config.maxUploadSizeBytes / 1024 / 1024)} MB).` });
+  }
+  const upload = await createUploadUrl({
+    conversationId: String(req.params.id), userId: req.user.id, contentType, size
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.status(201).json({ ...upload, fileName: safeFileName, contentType, size });
+}));
+
+api.get('/conversations/:id/messages/:messageId/attachments/:attachmentId', asyncHandler(async (req, res) => {
+  if (!isStorageConfigured()) return res.status(503).json({ error: 'File sharing is not configured.' });
+  await requireMember(req.params.id, req.user._id);
+  const message = await Message.findOne({
+    _id: req.params.messageId, conversationId: req.params.id, deletedAt: null
+  }).select('attachments');
+  const attachment = message?.attachments.find((item) => item.attachmentId === req.params.attachmentId);
+  if (!attachment) return res.status(404).json({ error: 'Attachment not found.' });
+  const url = await createDownloadUrl({
+    key: attachment.key, fileName: attachment.fileName, contentType: attachment.contentType
+  });
+  const downloadUrl = await createDownloadUrl({
+    key: attachment.key, fileName: attachment.fileName, contentType: attachment.contentType, download: true
+  });
+  res.set('Cache-Control', 'no-store');
+  return res.json({ url, downloadUrl, expiresIn: 300 });
 }));

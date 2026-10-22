@@ -7,12 +7,15 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "build:client": "node scripts/copy-socket-client.js",
-    "check": "node --check server/config.js && node --check server/models.js && node --check server/auth.js && node --check server/security.js && node --check server/routes.js && node --check server/socket.js && node --check server/index.js && node --check scripts/copy-socket-client.js && node --check public/app.js"
+    "check": "node --check server/config.js && node --check server/models.js && node --check server/auth.js && node --check server/security.js && node --check server/validation.js && node --check server/uploads.js && node --check server/msg91.js && node --check server/routes.js && node --check server/socket.js && node --check server/index.js && node --check scripts/copy-socket-client.js && node --check public/app.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1156.0",
+    "@aws-sdk/s3-request-presigner": "^3.1156.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",

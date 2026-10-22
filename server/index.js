@@ -21,7 +21,7 @@ app.use(helmet({
       fontSrc: ["'self'", 'data:'],
       connectSrc: ["'self'", ...config.origins, 'wss:', 'https:'],
       imgSrc: ["'self'", 'data:', 'https:'],
-      mediaSrc: ["'self'", 'blob:'],
+      mediaSrc: ["'self'", 'blob:', 'https:'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"]
     }

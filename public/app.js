@@ -32,6 +32,27 @@ const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => (
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[char]));
 const initials = (name = '?') => name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+const iconPaths = {
+  sparkle: '<path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/><path d="m19 15 .9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15Z"/>',
+  arrowLeft: '<path d="m15 18-6-6 6-6"/><path d="M9 12h12"/>',
+  share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.7 10.7 6.6-4.4m-6.6 7 6.6 4.4"/>',
+  phone: '<path d="M7 3h3l2 5-2 2a15 15 0 0 0 4 4l2-2 5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 5 5a2 2 0 0 1 2-2Z"/>',
+  video: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4 20-7ZM22 2 11 13"/>',
+  expand: '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"/>',
+  mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-4 0h8"/>',
+  micOff: '<path d="m2 2 20 20M9 9v3a3 3 0 0 0 5.1 2.1M15 9V5a3 3 0 0 0-5.8-1M5 10v2a7 7 0 0 0 12 5m2-5v-2M12 19v3m-4 0h8"/>',
+  camera: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3"/>',
+  cameraOff: '<path d="m2 2 20 20M10 6h4a2 2 0 0 1 2 2v.5l5-3v13l-5-3V16a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2"/>',
+  switch: '<path d="m17 3 4 4-4 4M3 7h18M7 21l-4-4 4-4m14 4H3"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.7 1l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.7-1l-1.7.7-1.4-2.4 1.4-1.1a8 8 0 0 1 0-2l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.7-1l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.7 1l1.7-.7 1.4 2.4-1.4 1.1a8 8 0 0 1 0 2Z"/>',
+  logout: '<path d="M10 17l5-5-5-5m5 5H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/>'
+};
+const icon = (name, className = '') => `<svg class="icon-svg ${className}" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${iconPaths[name]}</svg>`;
 const formatTime = (date) => new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(date));
 const formatDate = (date) => new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(date));
 const activeConversation = () => state.conversations.find((conversation) => conversation._id === state.activeId);
@@ -62,134 +83,27 @@ async function request(path, options = {}) {
   return data;
 }
 
-function renderAuth(register = false, method = 'email') {
-  document.title = method === 'phone' ? 'Phone verification | ConnectX' : (register ? 'Create account | ConnectX' : 'Sign in | ConnectX');
+function renderAuth(register = false) {
+  document.title = register ? 'Create account | ConnectX' : 'Sign in | ConnectX';
   const inviteToken = inviteFromUrl();
-  let otpSent = false;
-  let sendCode;
-  let countdownTimer;
   root.innerHTML = `
     <section class="auth-wrap">
       <form class="auth-card" id="auth-form">
         <a class="brand-link" href="./" aria-label="ConnectX home"><span class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></span></a>
-        <h2>${method === 'phone' ? (register ? 'Create an account with your phone' : 'Sign in with your phone') : (register ? 'Create your account' : 'Welcome back')}</h2>
-        <p>${method === 'phone' ? 'We will send a one-time verification code to your mobile number.' : (register ? 'A more personal way to stay close, wherever life takes you.' : 'Sign in to pick up right where you left off.')}</p>
+        <h2>${register ? 'Create your account' : 'Welcome back'}</h2>
+        <p>${register ? 'A more personal way to stay close, wherever life takes you.' : 'Sign in to pick up right where you left off.'}</p>
         ${inviteToken ? '<div class="invite-card">You have a private chat invitation. Sign in or create an account to join.</div>' : ''}
-        <div class="auth-methods" role="group" aria-label="Sign-in method">
-          <button class="auth-method${method === 'email' ? ' selected' : ''}" id="email-method" type="button" aria-pressed="${method === 'email'}">Email &amp; password</button>
-          <button class="auth-method${method === 'phone' ? ' selected' : ''}" id="phone-method" type="button" aria-pressed="${method === 'phone'}">Phone &amp; OTP</button>
-        </div>
         ${register ? `<div class="field"><label for="display-name">Display name</label><input id="display-name" name="displayName" maxlength="60" required autocomplete="name"></div>
           <div class="field"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required autocomplete="username"></div>` : ''}
-        ${method === 'phone' ? `
-          ${register ? '<div class="field"><label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email"></div>' : ''}
-          <div class="field"><label for="country-code">Country code</label>
-            <select id="country-code" name="countryCode">
-              <option value="+91" selected>India (+91)</option><option value="+1">United States / Canada (+1)</option>
-              <option value="+44">United Kingdom (+44)</option><option value="+61">Australia (+61)</option>
-              <option value="+880">Bangladesh (+880)</option><option value="+49">Germany (+49)</option>
-              <option value="+33">France (+33)</option><option value="+977">Nepal (+977)</option>
-              <option value="+92">Pakistan (+92)</option><option value="+65">Singapore (+65)</option>
-              <option value="+27">South Africa (+27)</option><option value="+971">United Arab Emirates (+971)</option>
-              <option value="+234">Nigeria (+234)</option><option value="+81">Japan (+81)</option>
-              <option value="other">Other (enter full international number)</option>
-            </select>
-          </div>
-          <div class="field"><label for="phone-number">Mobile number</label><input id="phone-number" type="tel" inputmode="tel" maxlength="16" required autocomplete="tel-national" placeholder="9876543210"></div>
-          <div id="otp-step" hidden>
-            <div class="field"><label for="otp-code">Verification code</label><input id="otp-code" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" maxlength="8"></div>
-            <div class="otp-actions"><span id="otp-countdown" aria-live="polite"></span><button class="link-button" id="resend-otp" type="button" disabled>Resend code</button><button class="link-button" id="change-phone" type="button">Change number</button></div>
-          </div>
-        ` : `
-          <div class="field"><label for="email">Email</label><input id="email" name="email" type="email" maxlength="254" required autocomplete="email"></div>
-          <div class="field"><label for="password">Password${register ? ' (10+ characters)' : ''}</label><input id="password" name="password" type="password" minlength="${register ? 10 : 1}" maxlength="128" required autocomplete="${register ? 'new-password' : 'current-password'}"></div>
-        `}
-        <button class="button primary" type="submit">${method === 'phone' ? 'Send verification code' : (register ? 'Create account' : 'Sign in')}</button>
+        <div class="field"><label for="${register ? 'email' : 'identifier'}">${register ? 'Email' : 'Email or username'}</label><input id="${register ? 'email' : 'identifier'}" name="${register ? 'email' : 'identifier'}" type="${register ? 'email' : 'text'}" maxlength="254" required autocomplete="${register ? 'email' : 'username'}" ${register ? '' : 'autocapitalize="none" spellcheck="false"'}></div>
+        <div class="field"><label for="password">Password${register ? ' (10+ characters)' : ''}</label><input id="password" name="password" type="password" minlength="${register ? 10 : 1}" maxlength="128" required autocomplete="${register ? 'new-password' : 'current-password'}"></div>
+        <button class="button primary" type="submit">${register ? 'Create account' : 'Sign in'}</button>
         <p class="auth-switch">${register ? 'Already have an account?' : 'New to ConnectX?'}
           <button class="link-button" type="button" id="toggle-auth">${register ? 'Sign in' : 'Create account'}</button>
         </p>
       </form>
     </section>`;
-  document.getElementById('toggle-auth').addEventListener('click', () => {
-    clearInterval(countdownTimer);
-    renderAuth(!register, method);
-  });
-  document.getElementById('email-method').addEventListener('click', () => {
-    clearInterval(countdownTimer);
-    renderAuth(register, 'email');
-  });
-  document.getElementById('phone-method').addEventListener('click', () => {
-    clearInterval(countdownTimer);
-    renderAuth(register, 'phone');
-  });
-
-  if (method === 'phone') {
-    const phoneInput = document.getElementById('phone-number');
-    const countryCode = document.getElementById('country-code');
-    const otpStep = document.getElementById('otp-step');
-    const otpInput = document.getElementById('otp-code');
-    const resendButton = document.getElementById('resend-otp');
-    const countdown = document.getElementById('otp-countdown');
-    const submitButton = document.querySelector('#auth-form [type="submit"]');
-    const phoneValue = () => countryCode.value === 'other'
-      ? phoneInput.value.replace(/[\s()-]/g, '')
-      : `${countryCode.value}${phoneInput.value.replace(/\D/g, '')}`;
-    countryCode.addEventListener('change', () => {
-      phoneInput.placeholder = countryCode.value === 'other' ? '+919876543210' : '9876543210';
-    });
-    const startCountdown = () => {
-      clearInterval(countdownTimer);
-      let seconds = 30;
-      resendButton.disabled = true;
-      countdown.textContent = `You can request another code in ${seconds}s.`;
-      countdownTimer = setInterval(() => {
-        seconds--;
-        countdown.textContent = seconds > 0 ? `You can request another code in ${seconds}s.` : '';
-        if (seconds <= 0) {
-          clearInterval(countdownTimer);
-          resendButton.disabled = false;
-        }
-      }, 1000);
-    };
-    sendCode = async () => {
-      await request('/auth/phone/send-otp', {
-        method: 'POST', body: JSON.stringify({ phoneNumber: phoneValue() })
-      });
-      otpSent = true;
-      phoneInput.disabled = true;
-      countryCode.disabled = true;
-      otpInput.required = true;
-      otpStep.hidden = false;
-      submitButton.textContent = register ? 'Verify and create account' : 'Verify and sign in';
-      notify('Verification code sent.');
-      startCountdown();
-      otpInput.focus();
-    };
-    document.getElementById('change-phone').addEventListener('click', () => {
-      clearInterval(countdownTimer);
-      otpSent = false;
-      otpInput.value = '';
-      otpInput.required = false;
-      otpStep.hidden = true;
-      phoneInput.disabled = false;
-      countryCode.disabled = false;
-      submitButton.textContent = 'Send verification code';
-      phoneInput.focus();
-    });
-    resendButton.addEventListener('click', async () => {
-      resendButton.disabled = true;
-      try {
-        await request('/auth/phone/send-otp', {
-          method: 'POST', body: JSON.stringify({ phoneNumber: phoneValue() })
-        });
-        notify('A new verification code was sent.');
-        startCountdown();
-      } catch (error) {
-        notify(error.message, true);
-        resendButton.disabled = false;
-      }
-    });
-  }
+  document.getElementById('toggle-auth').addEventListener('click', () => renderAuth(!register));
 
   document.getElementById('auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -198,43 +112,16 @@ function renderAuth(register = false, method = 'email') {
     if (submitButton.disabled) return;
     const originalLabel = submitButton.textContent;
     submitButton.disabled = true;
-    submitButton.textContent = method === 'phone' ? (otpSent ? 'Verifying code…' : 'Sending code…') : (register ? 'Creating account…' : 'Signing in…');
+    submitButton.textContent = register ? 'Creating account…' : 'Signing in…';
     const form = new FormData(formElement);
     const body = Object.fromEntries(form.entries());
     try {
-      let result;
-      if (method === 'phone') {
-        if (!otpSent) {
-          const countryCode = document.getElementById('country-code').value;
-          const phoneInput = document.getElementById('phone-number').value;
-          const phoneNumber = countryCode === 'other'
-            ? phoneInput.replace(/[\s()-]/g, '')
-            : `${countryCode}${phoneInput.replace(/\D/g, '')}`;
-          if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error('Enter a valid mobile number.');
-          await sendCode();
-          return;
-        }
-        const countryCode = document.getElementById('country-code').value;
-        const phoneInput = document.getElementById('phone-number').value;
-        const phoneNumber = countryCode === 'other'
-          ? phoneInput.replace(/[\s()-]/g, '')
-          : `${countryCode}${phoneInput.replace(/\D/g, '')}`;
-        result = await request('/auth/phone/verify', {
-          method: 'POST',
-          body: JSON.stringify({
-            phoneNumber, otp: body.otp, mode: register ? 'register' : 'login',
-            username: body.username, displayName: body.displayName, email: body.email
-          })
-        });
-      } else {
-        result = await request(`/auth/${register ? 'register' : 'login'}`, {
-          method: 'POST', body: JSON.stringify(body)
-        });
-      }
+      const result = await request(`/auth/${register ? 'register' : 'login'}`, {
+        method: 'POST', body: JSON.stringify(body)
+      });
       state.token = result.token;
       state.user = result.user;
       sessionStorage.setItem(tokenKey, result.token);
-      clearInterval(countdownTimer);
       notify(register ? 'Your account is ready.' : 'Signed in successfully.');
       startApp();
     } catch (error) {
@@ -242,9 +129,7 @@ function renderAuth(register = false, method = 'email') {
     } finally {
       if (formElement.isConnected) {
         submitButton.disabled = false;
-        submitButton.textContent = method === 'phone' && otpSent
-          ? (register ? 'Verify and create account' : 'Verify and sign in')
-          : (method === 'phone' ? 'Send verification code' : originalLabel);
+        submitButton.textContent = originalLabel;
       }
     }
   });
@@ -275,10 +160,10 @@ function renderShell(announce = false) {
         <div class="side-top">
           <a class="brand-link" href="./" aria-label="ConnectX home" data-home><span class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></span></a>
           <p class="brand-subtitle">Private conversations, wherever you are.</p>
-          <label class="search-wrap"><span class="search-icon">⌕</span><input id="conversation-search" type="search" placeholder="Search conversations" aria-label="Search conversations" value="${escapeHtml(filter)}"></label>
+          <label class="search-wrap"><span class="search-icon">${icon('search')}</span><input id="conversation-search" type="search" placeholder="Search conversations" aria-label="Search conversations" value="${escapeHtml(filter)}"></label>
         </div>
         <div class="side-actions">
-          <button class="button primary" id="new-chat" type="button">＋ New chat</button>
+          <button class="button primary" id="new-chat" type="button">${icon('plus')} New chat</button>
           <button class="button secondary" id="join-chat" type="button">Join code</button>
         </div>
         <div class="section-label">RECENT CHATS</div>
@@ -286,8 +171,8 @@ function renderShell(announce = false) {
         <div class="profile-row">
           ${avatarMarkup(state.user)}
           <span class="profile-copy"><strong>${escapeHtml(state.user.displayName)}</strong><small>@${escapeHtml(state.user.username)}</small></span>
-          <button class="icon-button" id="edit-profile" type="button" aria-label="Edit profile" title="Edit profile">⚙</button>
-          <button class="icon-button" id="sign-out" type="button" aria-label="Sign out" title="Sign out">↪</button>
+          <button class="icon-button" id="edit-profile" type="button" aria-label="Edit profile" title="Edit profile">${icon('settings')}</button>
+          <button class="icon-button" id="sign-out" type="button" aria-label="Sign out" title="Sign out">${icon('logout')}</button>
         </div>
       </aside>
       <section class="chat-panel" id="chat-panel"></section>
@@ -344,21 +229,21 @@ function renderChatPanel(announce = false) {
   if (!panel) return;
   const conversation = activeConversation();
   if (!conversation) {
-    panel.innerHTML = `<div class="chat-empty"><div class="empty-illustration">✦</div><h2>Your people, one message away.</h2><p>Create a private chat and share an invite link. No contact syncing needed.</p></div>`;
+    panel.innerHTML = `<div class="chat-empty"><div class="empty-illustration">${icon('sparkle')}</div><h2>Your people, one message away.</h2><p>Create a private chat and share an invite link. No contact syncing needed.</p></div>`;
     return;
   }
   const person = otherPerson(conversation);
   panel.innerHTML = `
     <header class="chat-header">
-      <button class="icon-button back-button" id="back-to-list" type="button" aria-label="Back to chats">←</button>
+      <button class="icon-button back-button" id="back-to-list" type="button" aria-label="Back to chats">${icon('arrowLeft')}</button>
       <span data-peer-avatar>${avatarMarkup(person)}</span>
       <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span></div>
       <div class="header-actions">
-        <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>♧</button>
-        <button class="icon-button" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>☎</button>
-        <button class="icon-button" id="video-call" type="button" aria-label="Start video call" title="Video call" ${person ? '' : 'disabled'}>▣</button>
-        <button class="icon-button" id="leave-chat" type="button" aria-label="Leave conversation" title="Leave conversation">⋯</button>
-        ${conversation.createdBy === state.user._id ? '<button class="icon-button" id="revoke-invite" type="button" aria-label="Revoke invitation" title="Revoke invitation">⊘</button>' : ''}
+        <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>${icon('share')}</button>
+        <button class="icon-button call-action audio-action" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>${icon('phone')}</button>
+        <button class="icon-button call-action video-action" id="video-call" type="button" aria-label="Start video call" title="Video call" ${person ? '' : 'disabled'}>${icon('video')}</button>
+        <button class="icon-button" id="leave-chat" type="button" aria-label="Leave conversation" title="Leave conversation">${icon('more')}</button>
+        ${conversation.createdBy === state.user._id ? `<button class="icon-button" id="revoke-invite" type="button" aria-label="Revoke invitation" title="Revoke invitation">${icon('ban')}</button>` : ''}
       </div>
     </header>
     <div class="messages" id="messages" role="log" aria-label="Messages"></div>
@@ -367,9 +252,9 @@ function renderChatPanel(announce = false) {
     <form class="composer" id="composer">
       <input id="attachment-picker" class="visually-hidden" type="file" multiple
         accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,application/pdf,text/plain,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/zip">
-      <button class="icon-button" id="attach-file" type="button" aria-label="Attach file" title="Share files">＋</button>
+      <button class="icon-button attach-button" id="attach-file" type="button" aria-label="Attach file" title="Share files">${icon('plus')}</button>
       <textarea id="message-input" rows="1" maxlength="4000" placeholder="Write a message…" aria-label="Message"></textarea>
-      <button class="send-button" type="submit" aria-label="Send message">➤</button>
+      <button class="send-button" type="submit" aria-label="Send message">${icon('send')}</button>
     </form>
     <div class="call-screen" id="call-screen" hidden></div>`;
   document.getElementById('back-to-list').addEventListener('click', () => {
@@ -853,28 +738,10 @@ async function editProfile() {
     state.user = data.user;
     renderShell();
     notify('Profile updated.');
-    if (state.user.phoneNumber) return;
   } catch (error) {
     notify(error.message, true);
     return;
   }
-  if (state.user.phoneNumber) return;
-  const phoneNumber = prompt('Link a mobile number for OTP sign-in? Include the country code, for example +919876543210:');
-  if (phoneNumber === null || !phoneNumber.trim()) return;
-  const normalizedPhone = phoneNumber.trim().replace(/[\s()-]/g, '');
-  try {
-    await request('/profile/phone/send-otp', {
-      method: 'POST', body: JSON.stringify({ phoneNumber: normalizedPhone })
-    });
-    const otp = prompt(`Enter the verification code sent to ${normalizedPhone}:`);
-    if (otp === null) return;
-    const linked = await request('/profile/phone/verify', {
-      method: 'POST', body: JSON.stringify({ phoneNumber: normalizedPhone, otp: otp.trim() })
-    });
-    state.user = linked.user;
-    renderShell();
-    notify('Phone number verified and linked to your account.');
-  } catch (error) { notify(error.message, true); }
 }
 
 async function sendMessage(event) {
@@ -1284,17 +1151,17 @@ function showCallScreen(status) {
   const video = state.call.callType === 'video';
   screen.hidden = false;
   screen.innerHTML = `
-    <div class="call-top"><strong>${escapeHtml(state.call.name)}</strong><button class="icon-button" id="fullscreen-call" aria-label="Fullscreen">⛶</button></div>
+    <div class="call-top"><strong>${escapeHtml(state.call.name)}</strong><button class="icon-button" id="fullscreen-call" aria-label="Fullscreen">${icon('expand')}</button></div>
     <div class="call-videos">
       <audio id="remote-audio" autoplay></audio>
       ${video ? '<video class="remote-video" id="remote-video" autoplay playsinline></video><video class="local-video" id="local-video" autoplay playsinline muted></video>' : `<div class="call-avatar">${escapeHtml(initials(state.call.name))}</div>`}
     </div>
     <div class="call-status" id="call-status">${escapeHtml(status)}</div>
     <div class="call-controls">
-      <button class="call-control" id="toggle-mic" aria-label="Mute microphone" title="Mute microphone">🎙</button>
-      ${video ? '<button class="call-control" id="toggle-camera" aria-label="Turn camera off" title="Turn camera off">▣</button>' : ''}
-      ${video ? '<button class="call-control" id="switch-camera" aria-label="Switch camera" title="Switch camera">⇄</button>' : ''}
-      <button class="call-control end" id="end-call" aria-label="End call" title="End call">☎</button>
+      <button class="call-control" id="toggle-mic" aria-label="Mute microphone" title="Mute microphone">${icon('mic')}</button>
+      ${video ? `<button class="call-control" id="toggle-camera" aria-label="Turn camera off" title="Turn camera off">${icon('camera')}</button>` : ''}
+      ${video ? `<button class="call-control" id="switch-camera" aria-label="Switch camera" title="Switch camera">${icon('switch')}</button>` : ''}
+      <button class="call-control end" id="end-call" aria-label="End call" title="End call">${icon('phone', 'call-end-icon')}</button>
     </div>`;
   const localVideo = document.getElementById('local-video');
   if (localVideo && state.call.localStream) localVideo.srcObject = state.call.localStream;
@@ -1358,7 +1225,7 @@ function toggleMic() {
   state.call.muted = !state.call.muted;
   state.call.localStream.getAudioTracks().forEach((track) => { track.enabled = !state.call.muted; });
   const button = document.getElementById('toggle-mic');
-  button.textContent = state.call.muted ? '🔇' : '🎙';
+  button.innerHTML = state.call.muted ? icon('micOff') : icon('mic');
   button.setAttribute('aria-label', state.call.muted ? 'Unmute microphone' : 'Mute microphone');
 }
 
@@ -1367,7 +1234,7 @@ function toggleCamera() {
   state.call.cameraOff = !state.call.cameraOff;
   state.call.localStream.getVideoTracks().forEach((track) => { track.enabled = !state.call.cameraOff; });
   const button = document.getElementById('toggle-camera');
-  button.textContent = state.call.cameraOff ? '◉' : '▣';
+  button.innerHTML = state.call.cameraOff ? icon('cameraOff') : icon('camera');
   button.setAttribute('aria-label', state.call.cameraOff ? 'Turn camera on' : 'Turn camera off');
 }
 

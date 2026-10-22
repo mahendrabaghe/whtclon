@@ -4,17 +4,16 @@ ConnectX is a small, full-stack, one-to-one chat and WebRTC calling application.
 
 ## Implemented
 
-- Email/password registration and login (bcrypt hashes, signed JWT bearer tokens)
+- Email/password registration and email-or-username login (bcrypt hashes, signed JWT bearer tokens)
 - Private one-to-one invitations with random 256-bit tokens stored as SHA-256 hashes, expiry, and creator revocation
 - Authenticated conversation membership checks for REST and Socket.IO actions
 - Persistent text messages, history pagination, typing indicators, unread counts, read receipts, and author-only message deletion
 - Presence updates, profile display-name/avatar URL editing, and conversation search
 - Audio/video WebRTC calls with accept/reject/end, mic/camera toggles, camera switching, call duration, and TURN credential generation for coturn-compatible providers
-- Optional verified-phone login and signup through MSG91, while retaining email/password accounts
 - Private file sharing through Cloudflare R2 presigned uploads/downloads, with membership checks, upload progress, previews, and a 25 MB default file limit
-- Security headers, CORS allow-list, request size limits, authentication/OTP rate limits, and socket message throttling
+- Security headers, CORS allow-list, request size limits, authentication rate limits, and socket message throttling
 
-Phone OTP and file sharing require external provider configuration and may incur usage charges. They return explicit configuration errors until enabled. Profile images continue to use HTTPS URLs. Calls are not recorded or stored.
+File sharing requires external provider configuration and may incur usage charges. It returns explicit configuration errors until enabled. Profile images continue to use HTTPS URLs. Calls are not recorded or stored.
 
 ## Run locally
 
@@ -41,7 +40,6 @@ The build step copies the Socket.IO browser client and its license into `public/
 
 - Create a Render Web Service from this repository; use `npm install` as the build command and `npm start` as the start command.
 - Configure `MONGODB_URI`, `JWT_SECRET`, `FRONTEND_ORIGINS`, and any optional settings from `.env.example` in Render's environment settings. Never commit `.env`.
-- For phone OTP, create an MSG91 OTP template, then set `MSG91_AUTH_KEY`, `MSG91_TEMPLATE_ID`, `MSG91_OTP_LENGTH`, and `MSG91_OTP_EXPIRY_MINUTES` on the server. For India, complete the provider's applicable sender/template and DLT registration steps. Keep the auth key server-side.
 - For file sharing, create a private Cloudflare R2 bucket and an S3 API token limited to that bucket. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and optionally `MAX_UPLOAD_SIZE_BYTES` (up to 25 MB) on the server. Do not set these in frontend configuration.
 - Configure bucket CORS to allow your exact frontend origins, the `PUT` method, and the `Content-Type` request header. Add an R2 lifecycle rule to expire unclaimed objects under the `pending/` prefix after one day; completed uploads are moved to `attachments/`.
 - R2 uploads are direct from the browser and signed for five minutes; each chat participant receives short-lived private download links only after a membership check. Storage and transfer may be billed by Cloudflare; review its current pricing and quotas first.
@@ -72,7 +70,7 @@ STUN can establish many direct peer connections, but cannot guarantee calls thro
 - JWTs are not logged or put in URLs. Session tokens are held in `sessionStorage`; sign out clears the current browser session.
 - The authenticated REST API is protected by JWT. Conversation reads, message sends/deletes, typing, calls, and signaling all validate membership server-side.
 - Calls require a secure context (HTTPS, or localhost) and user permission for microphone/camera. STUN-only connectivity is best-effort.
-- Message history returns the newest page first; older pages are fetched with a `before` cursor. Existing email/password users remain unchanged; a verified phone can be linked from **Edit profile** after signing in. Phone-created accounts require an email and username and use OTP for future sign-in.
+- Message history returns the newest page first; older pages are fetched with a `before` cursor. Accounts are registered with an email and password and can sign in with either their email or username.
 - Uploads allow images, videos, PDFs, common documents, CSV/text, and ZIP files. The server validates declared MIME type and stored metadata/size; it does not perform antivirus scanning or inspect file contents, so share files only with trusted contacts.
-- Test OTP with a real MSG91 account and recipient phone, then test file upload/download, image/video preview, and unauthorized access using two separate signed-in browser profiles. Real provider, MongoDB, storage-bucket, and cross-device tests require those services and credentials; syntax/unit tests alone do not verify provider delivery.
+- Test file upload/download, image/video preview, and unauthorized access using two separate signed-in browser profiles. Real MongoDB, storage-bucket, and cross-device tests require those services and credentials.
 - Use a reverse proxy/host with HTTPS and websocket support. Configure production secrets and origins in the hosting provider; do not expose them in frontend code.

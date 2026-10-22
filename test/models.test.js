@@ -8,7 +8,7 @@ const ids = () => ({
   senderId: new mongoose.Types.ObjectId()
 });
 
-test('existing email/password user records remain valid without a phone number', async () => {
+test('email/password user records validate', async () => {
   const user = new User({
     username: 'existing_user', displayName: 'Existing User',
     email: 'existing@example.com', passwordHash: 'stored-hash'

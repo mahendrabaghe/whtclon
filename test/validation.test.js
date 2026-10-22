@@ -1,15 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isValidPhoneNumber, allowedAttachmentTypes, sanitizeFileName } from '../server/validation.js';
-
-test('accepts international phone numbers in E.164 format', () => {
-  assert.equal(isValidPhoneNumber('+919876543210'), true);
-  assert.equal(isValidPhoneNumber('+12025550123'), true);
-  assert.equal(isValidPhoneNumber('919876543210'), false);
-  assert.equal(isValidPhoneNumber('+0123456789'), false);
-  assert.equal(isValidPhoneNumber('+1234567'), false);
-  assert.equal(isValidPhoneNumber('+1234567890123456'), false);
-});
+import { allowedAttachmentTypes, sanitizeFileName } from '../server/validation.js';
 
 test('accepts only the configured attachment MIME types', () => {
   assert.equal(allowedAttachmentTypes.has('image/png'), true);

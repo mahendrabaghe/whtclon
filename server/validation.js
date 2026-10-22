@@ -11,9 +11,6 @@ export const allowedAttachmentTypes = new Set([
   'application/zip'
 ]);
 
-export const isValidPhoneNumber = (value) =>
-  typeof value === 'string' && /^\+[1-9]\d{7,14}$/.test(value);
-
 export function sanitizeFileName(value) {
   if (typeof value !== 'string') return '';
   const safeName = value.replace(/[\\/\u0000-\u001f\u007f]/g, '_').trim();

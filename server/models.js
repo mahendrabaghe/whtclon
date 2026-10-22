@@ -5,8 +5,6 @@ const userSchema = new mongoose.Schema({
   displayName: { type: String, required: true, trim: true, maxlength: 60 },
   email: { type: String, required: true, unique: true, trim: true, lowercase: true, maxlength: 254 },
   passwordHash: { type: String, required: true, select: false },
-  phoneNumber: { type: String, unique: true, sparse: true, trim: true },
-  phoneVerifiedAt: { type: Date, default: null },
   avatarUrl: { type: String, default: '', maxlength: 2048 },
   lastSeenAt: { type: Date, default: Date.now }
 }, { timestamps: true, toJSON: { transform: (_doc, ret) => { delete ret.passwordHash; delete ret.__v; return ret; } } });

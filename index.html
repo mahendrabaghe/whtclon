@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ConnectX</title>
+  </head>
+  <body>
+    <p>Opening ConnectX... <a id="app-link" href="public/">Continue</a></p>
+    <script>
+      const appUrl = new URL('public/', window.location.href);
+      appUrl.search = window.location.search;
+      appUrl.hash = window.location.hash;
+      document.getElementById('app-link').href = appUrl.href;
+      window.location.replace(appUrl.href);
+    </script>
+  </body>
+</html>

@@ -6,12 +6,53 @@ import { idString, requireMember } from './security.js';
 
 const userRoom = (id) => `user:${id}`;
 const messageWindows = new Map();
+const callSessions = new Map();
+const CALL_SETUP_TTL_MS = 60_000;
+const CALL_ACTIVE_TTL_MS = 4 * 60 * 60 * 1000;
+let socketServer;
+
+function setCallExpiry(callId, session, ttl) {
+  clearTimeout(session.expiryTimer);
+  session.expiryTimer = setTimeout(() => {
+    if (callSessions.get(callId) === session) callSessions.delete(callId);
+  }, ttl);
+  session.expiryTimer.unref();
+}
+
+function clearCallSession(callId) {
+  const session = callSessions.get(callId);
+  if (!session) return;
+  clearTimeout(session.expiryTimer);
+  callSessions.delete(callId);
+}
+
+export async function notifyConversationMemberLeft(conversationId, userId, remainingMembers) {
+  if (!socketServer) return;
+  const canonicalConversationId = idString(conversationId);
+  const room = `conversation:${canonicalConversationId}`;
+  await socketServer.in(userRoom(userId)).socketsLeave(room);
+  for (const [callId, session] of callSessions) {
+    if (session.conversationId !== canonicalConversationId ||
+        (session.callerId !== userId && session.calleeId !== userId)) continue;
+    const targetUserId = session.callerId === userId ? session.calleeId : session.callerId;
+    clearCallSession(callId);
+    socketServer.to(userRoom(targetUserId)).emit('call:end', {
+      conversationId: canonicalConversationId, callId, fromUserId: userId, targetUserId
+    });
+  }
+  for (const memberId of remainingMembers) {
+    socketServer.to(userRoom(idString(memberId))).emit('conversation:updated', {
+      conversationId: canonicalConversationId
+    });
+  }
+}
 
 export function configureSocket(server) {
   const io = new Server(server, {
     cors: { origin: config.origins, methods: ['GET', 'POST'] },
     maxHttpBufferSize: 64 * 1024
   });
+  socketServer = io;
 
   io.use(async (socket, next) => {
     try {
@@ -70,11 +111,7 @@ export function configureSocket(server) {
         if (stillMember) return;
         const conversation = await Conversation.findById(conversationId).select('participantIds');
         if (!conversation) return;
-        const canonicalConversationId = idString(conversation._id);
-        await io.in(userRoom(userId)).socketsLeave(`conversation:${canonicalConversationId}`);
-        for (const memberId of conversation?.participantIds || []) {
-          io.to(userRoom(idString(memberId))).emit('conversation:updated', { conversationId: canonicalConversationId });
-        }
+        await notifyConversationMemberLeft(conversation._id, userId, conversation.participantIds);
       } catch { /* Leaving a room cannot grant access or send data. */ }
     });
 
@@ -184,13 +221,23 @@ export function configureSocket(server) {
     socket.on('call:invite', async (data = {}, ack = () => {}) => {
       try {
         const { conversationId, callId, callType, targetUserId } = data;
-        if (!['audio', 'video'].includes(callType) || typeof callId !== 'string') {
+        if (!['audio', 'video'].includes(callType) ||
+            typeof callId !== 'string' || !/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i.test(callId) ||
+            callSessions.has(callId)) {
           return ack({ ok: false, error: 'Invalid call request.' });
         }
         const conversation = await requireMember(conversationId, userId);
         if (!conversation.participantIds.some((id) => idString(id) === targetUserId) || targetUserId === userId) {
           return ack({ ok: false, error: 'Call recipient is not a conversation member.' });
         }
+        const session = {
+          conversationId: idString(conversation._id),
+          callerId: userId,
+          calleeId: targetUserId,
+          expiryTimer: null
+        };
+        callSessions.set(callId, session);
+        setCallExpiry(callId, session, CALL_SETUP_TTL_MS);
         io.to(userRoom(targetUserId)).emit('call:incoming', {
           conversationId: idString(conversation._id), callId, callType,
           caller: { _id: userId, displayName: socket.user.displayName }
@@ -204,10 +251,16 @@ export function configureSocket(server) {
     for (const event of ['call:accept', 'call:reject', 'call:end', 'call:offer', 'call:answer', 'call:ice']) {
       socket.on(event, async (data = {}) => {
         try {
-          const { conversationId, targetUserId } = data;
-          const conversation = await requireMember(conversationId, userId);
-          if (!conversation.participantIds.some((id) => idString(id) === targetUserId) || targetUserId === userId) return;
-          const signal = { ...data, conversationId: idString(conversation._id), fromUserId: userId };
+          const { conversationId, callId, targetUserId } = data;
+          const session = callSessions.get(callId);
+          if (!session || session.conversationId !== conversationId) return;
+          const isCaller = userId === session.callerId;
+          if ((!isCaller && userId !== session.calleeId) ||
+              targetUserId !== (isCaller ? session.calleeId : session.callerId) ||
+              ((event === 'call:accept' || event === 'call:reject') && isCaller)) return;
+          if (event === 'call:accept') setCallExpiry(callId, session, CALL_ACTIVE_TTL_MS);
+          if (event === 'call:reject' || event === 'call:end') clearCallSession(callId);
+          const signal = { ...data, fromUserId: userId };
           delete signal.token;
           io.to(userRoom(targetUserId)).emit(event, signal);
         } catch { /* Invalid or unauthorized call signals are discarded. */ }

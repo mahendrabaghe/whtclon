@@ -6,6 +6,7 @@ import { config } from './config.js';
 import { authenticateToken, issueToken } from './auth.js';
 import { Conversation, Invitation, Message, User } from './models.js';
 import { findValidInvitation, hashInviteToken, requireMember } from './security.js';
+import { notifyConversationMemberLeft } from './socket.js';
 
 export const api = Router();
 const authLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false });
@@ -151,21 +152,48 @@ api.post('/conversations/:id/invitations', asyncHandler(async (req, res) => {
 api.get('/conversations', asyncHandler(async (req, res) => {
   const conversations = await Conversation.find({ participantIds: req.user._id })
     .sort({ lastMessageAt: -1 }).populate('participantIds', 'displayName username avatarUrl lastSeenAt');
-  const results = await Promise.all(conversations.map(async (conversation) => {
-    const latest = await Message.findOne({ conversationId: conversation._id }).sort({ createdAt: -1 });
+  const conversationIds = conversations.map((conversation) => conversation._id);
+  const unreadFilters = conversations.map((conversation) => ({
+    conversationId: conversation._id,
+    senderId: { $ne: req.user._id },
+    createdAt: { $gt: conversation.lastReadAt?.get(req.user.id) || new Date(0) }
+  }));
+  const [latestMessages, unreadCounts] = conversationIds.length ? await Promise.all([
+    Conversation.aggregate([
+      { $match: { _id: { $in: conversationIds } } },
+      {
+        $lookup: {
+          from: Message.collection.name,
+          let: { conversationId: '$_id' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$conversationId', '$$conversationId'] } } },
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $limit: 1 },
+            { $project: { text: 1, createdAt: 1, deletedAt: 1 } }
+          ],
+          as: 'latestMessage'
+        }
+      },
+      { $project: { _id: 1, latestMessage: { $arrayElemAt: ['$latestMessage', 0] } } }
+    ]),
+    Message.aggregate([
+      { $match: { $or: unreadFilters } },
+      { $group: { _id: '$conversationId', count: { $sum: 1 } } }
+    ])
+  ]) : [[], []];
+  const latestByConversation = new Map(latestMessages.map((item) => [String(item._id), item.latestMessage]));
+  const unreadByConversation = new Map(unreadCounts.map((item) => [String(item._id), item.count]));
+  const results = conversations.map((conversation) => {
+    const latest = latestByConversation.get(String(conversation._id));
     const other = conversation.participantIds.find((user) => String(user._id) !== req.user.id);
-    const since = conversation.lastReadAt?.get(req.user.id) || new Date(0);
-    const unreadCount = await Message.countDocuments({
-      conversationId: conversation._id, senderId: { $ne: req.user._id }, createdAt: { $gt: since }
-    });
     return {
       _id: String(conversation._id), participantIds: conversation.participantIds.map(publicUser),
       createdBy: String(conversation.createdBy),
       other: other ? publicUser(other) : null,
       lastMessage: latest ? { text: latest.deletedAt ? 'Message deleted' : latest.text, createdAt: latest.createdAt } : null,
-      lastMessageAt: conversation.lastMessageAt, unreadCount
+      lastMessageAt: conversation.lastMessageAt, unreadCount: unreadByConversation.get(String(conversation._id)) || 0
     };
-  }));
+  });
   return res.json({ conversations: results });
 }));
 
@@ -184,7 +212,7 @@ api.get('/conversations/:id/messages', asyncHandler(async (req, res) => {
       query.createdAt = { $lt: beforeAt };
     }
   }
-  const messages = await Message.find(query).sort({ createdAt: -1, _id: -1 }).limit(limit).populate('senderId', 'displayName username');
+  const messages = await Message.find(query).sort({ createdAt: -1, _id: -1 }).limit(limit).select('conversationId senderId text createdAt readBy deletedAt').populate('senderId', 'displayName username');
   return res.json({ messages: messages.reverse().map((message) => ({
     _id: String(message._id), conversationId: String(message.conversationId),
     sender: publicUser(message.senderId), text: message.deletedAt ? '' : message.text,
@@ -208,6 +236,7 @@ api.post('/conversations/:id/leave', asyncHandler(async (req, res) => {
   const conversation = await requireMember(req.params.id, req.user._id);
   conversation.participantIds = conversation.participantIds.filter((id) => String(id) !== req.user.id);
   await conversation.save();
+  await notifyConversationMemberLeft(conversation._id, req.user.id, conversation.participantIds);
   return res.json({ left: true });
 }));
 

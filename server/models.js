@@ -35,7 +35,8 @@ const messageSchema = new mongoose.Schema({
   readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   deletedAt: { type: Date, default: null }
 }, { timestamps: true });
-messageSchema.index({ conversationId: 1, createdAt: -1 });
+messageSchema.index({ conversationId: 1, createdAt: -1, _id: -1 });
+messageSchema.index({ conversationId: 1, senderId: 1, createdAt: 1 });
 messageSchema.index({ senderId: 1, clientMessageId: 1 }, { unique: true });
 
 export const User = mongoose.model('User', userSchema);

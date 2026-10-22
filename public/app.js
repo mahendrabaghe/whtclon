@@ -10,11 +10,21 @@ const state = {
   activeId: null,
   hasMore: false,
   loadingOlder: false,
+  loadingMessageHistory: false,
+  loadingHistoryConversation: null,
+  pendingLiveMessages: new Map(),
+  messageLoadGeneration: 0,
   typingTimer: null,
+  typingActive: false,
   peerTyping: '',
   call: null,
-  online: new Set()
+  online: new Set(),
+  iceServers: null,
+  iceServersAt: 0,
+  iceServersPromise: null,
+  pendingAnnouncement: null
 };
+let socketClientPromise;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -51,11 +61,12 @@ async function request(path, options = {}) {
 }
 
 function renderAuth(register = false) {
+  document.title = register ? 'Create account | ConnectX' : 'Sign in | ConnectX';
   const inviteToken = inviteFromUrl();
   root.innerHTML = `
     <section class="auth-wrap">
       <form class="auth-card" id="auth-form">
-        <div class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></div>
+        <a class="brand-link" href="./" aria-label="ConnectX home"><span class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></span></a>
         <h2>${register ? 'Create your account' : 'Welcome back'}</h2>
         <p>${register ? 'A more personal way to stay close, wherever life takes you.' : 'Sign in to pick up right where you left off.'}</p>
         ${inviteToken ? '<div class="invite-card">You have a private chat invitation. Sign in or create an account to join.</div>' : ''}
@@ -72,7 +83,13 @@ function renderAuth(register = false) {
   document.getElementById('toggle-auth').addEventListener('click', () => renderAuth(!register));
   document.getElementById('auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const submitButton = formElement.querySelector('[type="submit"]');
+    if (submitButton.disabled) return;
+    const originalLabel = submitButton.textContent;
+    submitButton.disabled = true;
+    submitButton.textContent = register ? 'Creating account…' : 'Signing in…';
+    const form = new FormData(formElement);
     const body = Object.fromEntries(form.entries());
     try {
       const result = await request(`/auth/${register ? 'register' : 'login'}`, {
@@ -81,21 +98,30 @@ function renderAuth(register = false) {
       state.token = result.token;
       state.user = result.user;
       sessionStorage.setItem(tokenKey, result.token);
+      notify(register ? 'Your account is ready.' : 'Signed in successfully.');
       startApp();
     } catch (error) {
       notify(error.message, true);
+    } finally {
+      if (formElement.isConnected) {
+        submitButton.disabled = false;
+        submitButton.textContent = originalLabel;
+      }
     }
   });
 }
 
 function avatarMarkup(person, sizeClass = '') {
   if (person?.avatarUrl && /^https:\/\//i.test(person.avatarUrl)) {
-    return `<img class="avatar ${sizeClass}" src="${escapeHtml(person.avatarUrl)}" alt="">`;
+    return `<img class="avatar ${sizeClass}" src="${escapeHtml(person.avatarUrl)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`;
   }
   return `<span class="avatar ${sizeClass}" aria-hidden="true">${escapeHtml(initials(person?.displayName || 'ConnectX'))}</span>`;
 }
 
-function renderShell() {
+function renderShell(announce = false) {
+  const conversation = activeConversation();
+  const person = otherPerson(conversation);
+  document.title = person ? `${person.displayName} | ConnectX` : 'ConnectX — Stay close';
   const filter = document.getElementById('conversation-search')?.value.toLowerCase() || '';
   const visible = state.conversations.filter((conversation) => {
     const person = otherPerson(conversation);
@@ -105,7 +131,7 @@ function renderShell() {
     <div class="shell ${state.activeId ? 'in-chat' : ''}">
       <aside class="sidebar">
         <div class="side-top">
-          <div class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></div>
+          <a class="brand-link" href="./" aria-label="ConnectX home" data-home><span class="brand-row"><span class="brand-mark">C</span><h1>ConnectX</h1></span></a>
           <p class="brand-subtitle">Private conversations, wherever you are.</p>
           <label class="search-wrap"><span class="search-icon">⌕</span><input id="conversation-search" type="search" placeholder="Search conversations" aria-label="Search conversations" value="${escapeHtml(filter)}"></label>
         </div>
@@ -129,8 +155,16 @@ function renderShell() {
   document.getElementById('join-chat').addEventListener('click', joinByCode);
   document.getElementById('edit-profile').addEventListener('click', editProfile);
   document.getElementById('sign-out').addEventListener('click', signOut);
+  document.querySelector('[data-home]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    if (state.call) return notify('End the call before leaving the conversation.', true);
+    stopTyping();
+    state.activeId = null;
+    state.pendingAnnouncement = null;
+    renderShell();
+  });
   bindChatItems();
-  renderChatPanel();
+  return renderChatPanel(announce);
 }
 
 function chatItemsMarkup(conversations) {
@@ -163,7 +197,7 @@ function renderChatList() {
   bindChatItems();
 }
 
-function renderChatPanel() {
+function renderChatPanel(announce = false) {
   const panel = document.getElementById('chat-panel');
   if (!panel) return;
   const conversation = activeConversation();
@@ -175,10 +209,10 @@ function renderChatPanel() {
   panel.innerHTML = `
     <header class="chat-header">
       <button class="icon-button back-button" id="back-to-list" type="button" aria-label="Back to chats">←</button>
-      ${avatarMarkup(person)}
+      <span data-peer-avatar>${avatarMarkup(person)}</span>
       <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span></div>
       <div class="header-actions">
-        <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation">♧</button>
+        <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>♧</button>
         <button class="icon-button" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>☎</button>
         <button class="icon-button" id="video-call" type="button" aria-label="Start video call" title="Video call" ${person ? '' : 'disabled'}>▣</button>
         <button class="icon-button" id="leave-chat" type="button" aria-label="Leave conversation" title="Leave conversation">⋯</button>
@@ -194,6 +228,7 @@ function renderChatPanel() {
     </form>
     <div class="call-screen" id="call-screen" hidden></div>`;
   document.getElementById('back-to-list').addEventListener('click', () => {
+    stopTyping();
     state.activeId = null;
     renderShell();
   });
@@ -216,7 +251,7 @@ function renderChatPanel() {
   messageBox.addEventListener('scroll', () => {
     if (messageBox.scrollTop < 30 && state.hasMore && !state.loadingOlder) loadOlderMessages();
   });
-  loadMessages(conversation._id);
+  return loadMessages(conversation._id, announce);
 }
 
 function renderMessage(message, prepend = false) {
@@ -278,18 +313,29 @@ function renderMessage(message, prepend = false) {
 async function loadMessages(conversationId, announce = false) {
   const box = document.getElementById('messages');
   if (!box) return;
+  const generation = ++state.messageLoadGeneration;
+  state.loadingMessageHistory = true;
+  state.loadingHistoryConversation = conversationId;
+  state.pendingLiveMessages.clear();
   box.innerHTML = '<div class="day-divider">Loading messages…</div>';
   try {
-    await joinSocketConversation(conversationId, announce);
+    const joinPromise = state.socket?.connected
+      ? joinSocketConversation(conversationId, announce).then(() => {
+        if (state.pendingAnnouncement === conversationId) state.pendingAnnouncement = null;
+      })
+      : Promise.resolve();
+    joinPromise.catch((error) => {
+      if (state.activeId === conversationId) notify(error.message, true);
+    });
     const result = await request(`/conversations/${conversationId}/messages?limit=30`);
-    if (state.activeId !== conversationId) return;
+    if (state.messageLoadGeneration !== generation) return;
+    if (state.activeId !== conversationId || !box.isConnected) return;
+    const liveMessages = [...state.pendingLiveMessages.values()]
+      .sort((left, right) => new Date(left.createdAt) - new Date(right.createdAt));
     box.replaceChildren();
     state.hasMore = result.hasMore;
     result.messages.forEach((message) => renderMessage(message));
-    box.querySelectorAll('[data-message-id]').forEach((row) => {
-      const message = result.messages.find((item) => item._id === row.dataset.messageId);
-      if (message) row.dataset.createdAt = message.createdAt;
-    });
+    liveMessages.forEach((message) => renderMessage(message));
     if (!result.messages.length) box.innerHTML = '<div class="day-divider">This is the beginning of your conversation</div>';
     box.scrollTop = box.scrollHeight;
     socketEmit('message:read', { conversationId });
@@ -297,8 +343,20 @@ async function loadMessages(conversationId, announce = false) {
     if (conversation) conversation.unreadCount = 0;
     renderShellListOnly();
   } catch (error) {
-    box.textContent = error.message;
-    notify(error.message, true);
+    if (state.messageLoadGeneration === generation &&
+        state.activeId === conversationId && box.isConnected) {
+      box.textContent = error.message;
+      for (const message of state.pendingLiveMessages.values()) {
+        renderMessage(message);
+      }
+      notify(error.message, true);
+    }
+  } finally {
+    if (state.messageLoadGeneration === generation) {
+      state.loadingMessageHistory = false;
+      state.loadingHistoryConversation = null;
+      state.pendingLiveMessages.clear();
+    }
   }
 }
 
@@ -329,26 +387,48 @@ function renderShellListOnly() {
   renderChatList();
 }
 
-async function refreshConversations() {
+function updateActiveChatHeader() {
+  const conversation = activeConversation();
+  const person = otherPerson(conversation);
+  if (!conversation) return;
+  const avatar = document.querySelector('[data-peer-avatar]');
+  if (avatar) avatar.innerHTML = avatarMarkup(person);
+  const info = document.querySelector('.chat-header-info');
+  if (info) {
+    info.querySelector('strong').textContent = person?.displayName || 'Waiting for someone';
+    info.querySelector('span').textContent = person
+      ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`)
+      : 'Share an invitation to get started';
+  }
+  document.title = person ? `${person.displayName} | ConnectX` : 'ConnectX — Stay close';
+  const shareButton = document.getElementById('share-invite');
+  if (shareButton) shareButton.disabled = conversation.createdBy !== state.user._id || Boolean(person);
+  for (const id of ['audio-call', 'video-call']) {
+    const button = document.getElementById(id);
+    if (button) button.disabled = !person;
+  }
+}
+
+async function refreshConversations({ render = true } = {}) {
   const data = await request('/conversations');
   state.conversations = data.conversations;
-  renderShell();
+  if (render) await renderShell();
 }
 
 async function openConversation(id, announce = false) {
+  if (state.activeId !== id) stopTyping();
   state.activeId = id;
   state.peerTyping = '';
-  renderShell();
-  await loadMessages(id, announce);
+  state.pendingAnnouncement = announce ? id : null;
+  await renderShell(announce);
 }
 
 async function createConversation() {
   try {
     const result = await request('/conversations', { method: 'POST', body: '{}' });
-    await refreshConversations();
+    await refreshConversations({ render: false });
     state.activeId = result.conversationId;
-    renderShell();
-    await loadMessages(state.activeId);
+    await renderShell();
     await showInvite(result.inviteToken, result.expiresAt);
   } catch (error) { notify(error.message, true); }
 }
@@ -396,7 +476,7 @@ async function joinInvitation(token) {
       method: 'POST', body: JSON.stringify({ token })
     });
     history.replaceState(null, '', location.pathname);
-    await refreshConversations();
+    await refreshConversations({ render: false });
     await openConversation(result.conversationId, true);
     notify('You joined the conversation.');
   } catch (error) { notify(error.message, true); }
@@ -406,8 +486,8 @@ async function leaveConversation() {
   if (!confirm('Leave this private conversation? You will lose access to its messages.')) return;
   try {
     const leftId = state.activeId;
+    stopTyping(leftId);
     await request(`/conversations/${leftId}/leave`, { method: 'POST', body: '{}' });
-    socketEmit('conversation:leave', { conversationId: leftId });
     state.activeId = null;
     await refreshConversations();
     notify('You left the conversation.');
@@ -452,11 +532,26 @@ async function sendMessage(event) {
 
 function onTyping() {
   const text = document.getElementById('message-input').value;
-  socketEmit('typing', { conversationId: state.activeId, isTyping: Boolean(text) });
+  if (!text) {
+    stopTyping();
+    return;
+  }
+  if (!state.typingActive) {
+    socketEmit('typing', { conversationId: state.activeId, isTyping: true });
+    state.typingActive = true;
+  }
   clearTimeout(state.typingTimer);
-  if (text) state.typingTimer = setTimeout(() => socketEmit('typing', {
-    conversationId: state.activeId, isTyping: false
-  }), 1600);
+  const conversationId = state.activeId;
+  state.typingTimer = setTimeout(() => stopTyping(conversationId), 1600);
+}
+
+function stopTyping(conversationId = state.activeId) {
+  clearTimeout(state.typingTimer);
+  state.typingTimer = null;
+  if (state.typingActive && conversationId) {
+    socketEmit('typing', { conversationId, isTyping: false });
+  }
+  state.typingActive = false;
 }
 
 function socketEmit(event, data) {
@@ -480,18 +575,47 @@ function joinSocketConversation(conversationId, announce = false) {
   });
 }
 
-function connectSocket() {
-  if (!window.io) {
-    notify('Realtime client could not load. Check your network and refresh.', true);
+function loadSocketClient() {
+  if (window.io) return Promise.resolve();
+  if (!socketClientPromise) {
+    socketClientPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = new URL('./vendor/socket.io.min.js', document.baseURI);
+      script.async = true;
+      script.onload = () => window.io ? resolve() : reject(new Error('Realtime client did not initialize.'));
+      script.onerror = () => reject(new Error('Realtime client could not load.'));
+      document.head.append(script);
+    });
+  }
+  return socketClientPromise;
+}
+
+async function connectSocket() {
+  try {
+    await loadSocketClient();
+  } catch (error) {
+    socketClientPromise = null;
+    notify(`${error.message} Check your network and refresh.`, true);
     return;
   }
+  if (!state.token || state.socket) return;
   state.socket = window.io(API || location.origin, {
     auth: { token: state.token },
     transports: ['websocket', 'polling']
   });
   let hasConnected = false;
   state.socket.on('connect', () => {
-    if (hasConnected && state.activeId) loadMessages(state.activeId);
+    if (hasConnected && state.activeId) {
+      loadMessages(state.activeId, state.pendingAnnouncement === state.activeId);
+    }
+    else if (state.activeId) {
+      const conversationId = state.activeId;
+      joinSocketConversation(conversationId, state.pendingAnnouncement === conversationId)
+        .then(() => {
+          if (state.pendingAnnouncement === conversationId) state.pendingAnnouncement = null;
+        })
+        .catch((error) => notify(error.message, true));
+    }
     hasConnected = true;
   });
   state.socket.on('connect_error', (error) => notify(error.message || 'Realtime connection failed.', true));
@@ -503,12 +627,16 @@ function connectSocket() {
       if (message.conversationId !== state.activeId && message.sender._id !== state.user._id) conversation.unreadCount++;
     }
     if (message.conversationId === state.activeId) {
-      renderMessage(message);
+      if (state.loadingMessageHistory && state.loadingHistoryConversation === message.conversationId) {
+        state.pendingLiveMessages.set(message._id, message);
+      } else {
+        renderMessage(message);
+      }
       const box = document.getElementById('messages');
       if (box) box.scrollTop = box.scrollHeight;
       if (message.sender._id !== state.user._id) socketEmit('message:read', { conversationId: state.activeId });
     }
-    renderShell();
+    renderChatList();
   });
   state.socket.on('message:read-update', ({ conversationId, userId }) => {
     if (conversationId !== state.activeId || userId === state.user._id) return;
@@ -520,11 +648,11 @@ function connectSocket() {
     const text = row?.querySelector('.bubble')?.firstChild;
     if (text) text.textContent = 'Message deleted';
   });
-  state.socket.on('conversation:updated', async ({ conversationId }) => {
-    const activeId = state.activeId;
+  state.socket.on('conversation:updated', async () => {
     try {
-      await refreshConversations();
-      if (activeId === conversationId) await openConversation(conversationId);
+      await refreshConversations({ render: false });
+      renderChatList();
+      updateActiveChatHeader();
     } catch (error) { notify(error.message, true); }
   });
   state.socket.on('typing', (data) => {
@@ -535,7 +663,11 @@ function connectSocket() {
   });
   state.socket.on('presence', ({ userId, online }) => {
     if (online) state.online.add(userId); else state.online.delete(userId);
-    if (otherPerson(activeConversation())?._id === userId) renderChatPanel();
+    const person = otherPerson(activeConversation());
+    if (person?._id === userId) {
+      const status = document.querySelector('.chat-header-info span');
+      if (status) status.textContent = online ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`;
+    }
   });
   state.socket.on('call:incoming', handleIncomingCall);
   state.socket.on('call:accept', handleCallAccepted);
@@ -550,16 +682,20 @@ async function startCall(callType) {
   const person = otherPerson(activeConversation());
   if (!person) return;
   if (state.call) return notify('A call is already in progress.', true);
+  void getIceServers().catch((error) => console.warn('Could not preload call connection settings:', error.message));
   try {
     const media = await navigator.mediaDevices.getUserMedia({
-      audio: true, video: callType === 'video'
+      audio: true,
+      video: callType === 'video'
+        ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } }
+        : false
     });
     const callId = crypto.randomUUID();
     state.call = {
       callId, callType, conversationId: state.activeId, targetUserId: person._id,
       name: person.displayName, localStream: media, remoteStream: null, pc: null,
       pendingCandidates: [], incoming: false, connectedAt: null, timer: null,
-      muted: false, cameraOff: false
+      muted: false, cameraOff: false, iceRestartTimer: null
     };
     state.call.timer = setTimeout(() => {
       notify('No answer. The call has ended.');
@@ -586,11 +722,13 @@ function handleIncomingCall(call) {
     });
     return;
   }
+  void getIceServers().catch((error) => console.warn('Could not preload call connection settings:', error.message));
   state.call = {
     callId: call.callId, callType: call.callType, conversationId: call.conversationId,
     targetUserId: call.caller._id, name: call.caller.displayName,
     localStream: null, remoteStream: null, pc: null, pendingCandidates: [],
-    incoming: true, connectedAt: null, timer: null, muted: false, cameraOff: false
+    incoming: true, connectedAt: null, timer: null, muted: false, cameraOff: false,
+    iceRestartTimer: null
   };
   document.getElementById('call-label').textContent = 'INCOMING CALL';
   document.getElementById('call-name').textContent = call.caller.displayName;
@@ -610,7 +748,10 @@ document.getElementById('accept-call').addEventListener('click', async () => {
     call.timer = null;
     callDialog.close();
     call.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true, video: call.callType === 'video'
+      audio: true,
+      video: call.callType === 'video'
+        ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } }
+        : false
     });
     showCallScreen('Connecting…');
     socketEmit('call:accept', {
@@ -633,9 +774,29 @@ document.getElementById('reject-call').addEventListener('click', () => {
   state.call = null;
 });
 
+async function getIceServers() {
+  if (state.iceServers && Date.now() < state.iceServersAt) return state.iceServers;
+  if (!state.iceServersPromise) {
+    const pending = request('/ice-servers').then((result) => {
+      const now = Date.now();
+      const turnServer = result.iceServers.find((server) => typeof server.username === 'string');
+      const credentialExpiry = turnServer ? Number.parseInt(turnServer.username, 10) * 1000 : Number.NaN;
+      state.iceServers = result.iceServers;
+      state.iceServersAt = Number.isFinite(credentialExpiry)
+        ? Math.max(now, credentialExpiry - 30_000)
+        : now + 10 * 60_000;
+      return state.iceServers;
+    }).finally(() => {
+      if (state.iceServersPromise === pending) state.iceServersPromise = null;
+    });
+    state.iceServersPromise = pending;
+  }
+  return state.iceServersPromise;
+}
+
 async function getPeerConnection() {
-  const result = await request('/ice-servers');
-  const pc = new RTCPeerConnection({ iceServers: result.iceServers });
+  const iceServers = await getIceServers();
+  const pc = new RTCPeerConnection({ iceServers });
   const call = state.call;
   call.pc = pc;
   call.localStream.getTracks().forEach((track) => pc.addTrack(track, call.localStream));
@@ -658,9 +819,21 @@ async function getPeerConnection() {
     startCallTimer();
   };
   pc.onconnectionstatechange = () => {
-    if (['failed', 'disconnected'].includes(pc.connectionState)) {
-      setCallStatus(pc.connectionState === 'failed' ? 'Connection failed' : 'Connection interrupted');
+    if (pc.connectionState === 'disconnected') {
+      setCallStatus('Connection interrupted');
+      if (!call.iceRestartTimer) {
+        call.iceRestartTimer = setTimeout(() => {
+          call.iceRestartTimer = null;
+          if (state.call === call && pc.connectionState === 'disconnected') restartCallIce();
+        }, 5000);
+      }
+    } else if (pc.connectionState === 'failed') {
+      clearTimeout(call.iceRestartTimer);
+      call.iceRestartTimer = null;
+      setCallStatus('Connection failed');
     } else if (pc.connectionState === 'connected') {
+      clearTimeout(call.iceRestartTimer);
+      call.iceRestartTimer = null;
       setCallStatus('Connected');
       startCallTimer();
     } else if (pc.connectionState === 'closed') {
@@ -864,6 +1037,7 @@ function endCall(notifyPeer) {
   });
   clearInterval(call.timer);
   clearTimeout(call.timer);
+  clearTimeout(call.iceRestartTimer);
   call.localStream?.getTracks().forEach((track) => track.stop());
   call.remoteStream?.getTracks().forEach((track) => track.stop());
   call.pc?.close();
@@ -875,9 +1049,22 @@ function endCall(notifyPeer) {
 
 function signOut() {
   state.socket?.disconnect();
+  state.socket = null;
   endCall(false);
+  stopTyping();
   state.token = null;
   state.user = null;
+  state.conversations = [];
+  state.activeId = null;
+  state.online.clear();
+  state.messageLoadGeneration++;
+  state.loadingMessageHistory = false;
+  state.loadingHistoryConversation = null;
+  state.pendingLiveMessages.clear();
+  state.iceServers = null;
+  state.iceServersAt = 0;
+  state.iceServersPromise = null;
+  state.pendingAnnouncement = null;
   sessionStorage.removeItem(tokenKey);
   renderAuth();
 }
@@ -888,8 +1075,9 @@ async function startApp() {
       const data = await request('/auth/me');
       state.user = data.user;
     }
-    await refreshConversations();
-    connectSocket();
+    const conversationsPromise = refreshConversations();
+    void connectSocket();
+    await conversationsPromise;
     const inviteToken = inviteFromUrl();
     if (inviteToken) {
       try {

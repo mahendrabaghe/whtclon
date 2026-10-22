@@ -16,10 +16,10 @@ const numeric = (name, fallback, min, max) => {
   return value;
 };
 
-const r2Values = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME'];
-const configuredR2Values = r2Values.filter((name) => process.env[name]);
-if (configuredR2Values.length && configuredR2Values.length !== r2Values.length) {
-  throw new Error(`Set all Cloudflare R2 variables together: ${r2Values.join(', ')}.`);
+const cloudinaryValues = ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
+const configuredCloudinaryValues = cloudinaryValues.filter((name) => process.env[name]);
+if (configuredCloudinaryValues.length && configuredCloudinaryValues.length !== cloudinaryValues.length) {
+  throw new Error(`Set all Cloudinary variables together: ${cloudinaryValues.join(', ')}.`);
 }
 
 export const config = Object.freeze({
@@ -34,10 +34,9 @@ export const config = Object.freeze({
   turnUrls: (process.env.TURN_URLS || '').split(',').map((url) => url.trim()).filter(Boolean),
   turnSecret: process.env.TURN_SECRET || '',
   turnCredentialTtlSeconds: numeric('TURN_CREDENTIAL_TTL_SECONDS', 3600, 60, 86400),
-  r2AccountId: process.env.R2_ACCOUNT_ID || '',
-  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID || '',
-  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
-  r2BucketName: process.env.R2_BUCKET_NAME || '',
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
+  cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
   maxUploadSizeBytes: numeric('MAX_UPLOAD_SIZE_BYTES', 26214400, 1, 26214400)
 });
 if (config.turnUrls.some((url) => !/^turns?:/i.test(url))) {

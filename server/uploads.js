@@ -1,128 +1,210 @@
 import crypto from 'node:crypto';
-import { S3Client, CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { v2 as cloudinary } from 'cloudinary';
 import { config } from './config.js';
 
-const storageConfigured = Boolean(config.r2AccountId);
-const client = storageConfigured ? new S3Client({
-  region: 'auto',
-  endpoint: `https://${config.r2AccountId}.r2.cloudflarestorage.com`,
-  credentials: { accessKeyId: config.r2AccessKeyId, secretAccessKey: config.r2SecretAccessKey }
-}) : null;
-const bucket = config.r2BucketName;
+const storageConfigured = Boolean(config.cloudinaryCloudName);
+if (storageConfigured) {
+  cloudinary.config({
+    cloud_name: config.cloudinaryCloudName,
+    api_key: config.cloudinaryApiKey,
+    api_secret: config.cloudinaryApiSecret,
+    secure: true
+  });
+}
 
 export const isStorageConfigured = () => storageConfigured;
 
+const fileFormats = new Map([
+  ['image/jpeg', 'jpg'], ['image/png', 'png'], ['image/gif', 'gif'], ['image/webp', 'webp'],
+  ['video/mp4', 'mp4'], ['video/webm', 'webm'],
+  ['application/pdf', 'pdf'], ['text/plain', 'txt'], ['text/csv', 'csv'],
+  ['application/msword', 'doc'],
+  ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'docx'],
+  ['application/vnd.ms-excel', 'xls'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+  ['application/vnd.ms-powerpoint', 'ppt'],
+  ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'pptx'],
+  ['application/zip', 'zip']
+]);
+
+function resourceTypeFor(contentType) {
+  if (contentType.startsWith('image/')) return 'image';
+  if (contentType.startsWith('video/')) return 'video';
+  return 'raw';
+}
+
+function makeKey(resourceType, publicId) {
+  return `${resourceType}/${publicId}`;
+}
+
+function assetFromKey(key) {
+  const match = /^(image|video|raw)\/([a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9]+)?)$/.exec(key || '');
+  if (!match) {
+    const error = new Error('Stored upload identifier is invalid.');
+    error.status = 400;
+    throw error;
+  }
+  return { resourceType: match[1], publicId: match[2] };
+}
+
+function uploadParameters(publicId, contentType) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  return {
+    timestamp,
+    public_id: publicId,
+    type: 'authenticated',
+    overwrite: false,
+    context: `content_type=${contentType}`
+  };
+}
+
+function signedUpload(resourceType, publicId, contentType) {
+  const params = uploadParameters(publicId, contentType);
+  return {
+    uploadUrl: `https://api.cloudinary.com/v1_1/${encodeURIComponent(config.cloudinaryCloudName)}/${resourceType}/upload`,
+    fields: {
+      ...params,
+      api_key: config.cloudinaryApiKey,
+      signature: cloudinary.utils.api_sign_request(params, config.cloudinaryApiSecret)
+    },
+    expiresIn: 3600
+  };
+}
+
 export async function createUploadUrl({ conversationId, userId, contentType, size }) {
-  if (!client) throw new Error('Cloudflare R2 storage is not configured.');
+  if (!storageConfigured) throw new Error('Cloudinary storage is not configured.');
   const attachmentId = crypto.randomUUID();
-  const key = `pending/${conversationId}/${userId}/${attachmentId}`;
-  const headers = { 'Content-Type': contentType };
-  const command = new PutObjectCommand({
-    Bucket: bucket, Key: key, ContentType: contentType, ContentLength: size
-  });
+  const resourceType = resourceTypeFor(contentType);
+  const extension = resourceType === 'raw' ? `.${fileFormats.get(contentType)}` : '';
+  const publicId = `pending_chat_${conversationId}_${userId}_${attachmentId}${extension}`;
+  const upload = signedUpload(resourceType, publicId, contentType);
   return {
     attachmentId,
-    uploadUrl: await getSignedUrl(client, command, {
-      expiresIn: 300, signableHeaders: new Set(['content-type'])
-    }),
-    headers,
-    expiresIn: 300
+    uploadUrl: upload.uploadUrl,
+    fields: upload.fields,
+    expiresIn: upload.expiresIn
   };
 }
 
 export async function createProfileImageUploadUrl({ userId, contentType, size }) {
-  if (!client) throw new Error('Profile picture uploads require Cloudflare R2 storage configuration.');
-  const uploadId = crypto.randomUUID();
-  const key = `pending/avatars/${userId}/${uploadId}`;
-  const command = new PutObjectCommand({
-    Bucket: bucket, Key: key, ContentType: contentType, ContentLength: size
-  });
+  if (!storageConfigured) throw new Error('Profile picture uploads require Cloudinary configuration.');
+  const publicId = `pending_avatar_${userId}_${crypto.randomUUID()}`;
+  const upload = signedUpload('image', publicId, contentType);
   return {
-    key,
-    uploadUrl: await getSignedUrl(client, command, {
-      expiresIn: 300, signableHeaders: new Set(['content-type'])
-    }),
-    headers: { 'Content-Type': contentType },
-    expiresIn: 300
+    key: makeKey('image', publicId),
+    uploadUrl: upload.uploadUrl,
+    fields: upload.fields,
+    expiresIn: upload.expiresIn
   };
 }
 
 export async function completeProfileImageUpload({ key, userId, contentType, size }) {
-  if (!client) throw new Error('Profile picture uploads require Cloudflare R2 storage configuration.');
-  const safeUserId = String(userId);
-  const keyPattern = new RegExp(`^pending/avatars/${safeUserId}/([a-f\\d-]{36})$`, 'i');
-  if (!keyPattern.test(key)) {
+  if (!storageConfigured) throw new Error('Profile picture uploads require Cloudinary configuration.');
+  const asset = assetFromKey(key);
+  const keyPattern = new RegExp(`^pending_avatar_${userId}_([a-f\\d-]{36})$`, 'i');
+  const match = keyPattern.exec(asset.publicId);
+  if (asset.resourceType !== 'image' || !match) {
     const error = new Error('Profile picture upload is invalid or expired.');
     error.status = 400;
     throw error;
   }
-  const result = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
-  if (result.ContentLength !== size || result.ContentType !== contentType) {
-    const error = new Error('The uploaded profile picture did not pass validation.');
-    error.status = 400;
-    throw error;
-  }
-  const uploadId = key.slice(key.lastIndexOf('/') + 1);
-  const storedKey = `avatars/${safeUserId}/${uploadId}`;
-  const copySource = `${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`;
-  await client.send(new CopyObjectCommand({
-    Bucket: bucket, Key: storedKey, CopySource: copySource
-  }));
-  await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  await verifyAsset(asset, { contentType, size });
+  const storedKey = makeKey('image', `avatar_${userId}_${match[1]}`);
+  await cloudinary.uploader.rename(asset.publicId, assetFromKey(storedKey).publicId, undefined, {
+    resource_type: 'image', type: 'authenticated', to_type: 'authenticated',
+    overwrite: false, invalidate: true
+  });
   return storedKey;
 }
 
-function attachmentKeys({ conversationId, userId, attachmentId }) {
-  // The key binds every upload to its authenticated owner and conversation.
-  return {
-    pending: `pending/${conversationId}/${userId}/${attachmentId}`,
-    stored: `attachments/${conversationId}/${userId}/${attachmentId}`
-  };
+function attachmentKey({ conversationId, userId, attachmentId, contentType, pending = false }) {
+  const extension = fileFormats.get(contentType);
+  const resourceType = resourceTypeFor(contentType);
+  const suffix = resourceType === 'raw' ? `.${extension}` : '';
+  const prefix = pending ? 'pending_chat' : 'attachment';
+  return makeKey(resourceType, `${prefix}_${conversationId}_${userId}_${attachmentId}${suffix}`);
 }
 
-async function getVerifiedObject(key, { contentType, size }) {
-  const result = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
-  if (result.ContentLength !== size || result.ContentType !== contentType) {
+async function findAsset({ resourceType, publicId }) {
+  try {
+    return await cloudinary.api.resource(publicId, { resource_type: resourceType, type: 'authenticated' });
+  } catch (error) {
+    if (error.http_code === 404) return null;
+    throw error;
+  }
+}
+
+function validateAsset(result, { resourceType, contentType, size }) {
+  const expectedFormat = fileFormats.get(contentType);
+  if (result.bytes !== size || result.format !== expectedFormat ||
+      result.resource_type !== resourceType || result.type !== 'authenticated' ||
+      result.context?.custom?.content_type !== contentType) {
     const error = new Error('The uploaded file did not pass validation.');
     error.status = 400;
     throw error;
   }
+}
+
+async function verifyAsset(asset, details) {
+  const result = await findAsset(asset);
+  if (!result) {
+    const error = new Error('The uploaded file is invalid or expired.');
+    error.status = 400;
+    throw error;
+  }
+  validateAsset(result, { ...details, resourceType: asset.resourceType });
   return result;
 }
 
 export async function storeUploadedAttachment({ conversationId, userId, attachmentId, contentType, size }) {
-  if (!client) throw new Error('Cloudflare R2 storage is not configured.');
-  const { pending, stored } = attachmentKeys({ conversationId, userId, attachmentId });
-  try {
-    await getVerifiedObject(pending, { contentType, size });
-    const copySource = `${bucket}/${pending.split('/').map(encodeURIComponent).join('/')}`;
-    await client.send(new CopyObjectCommand({
-      Bucket: bucket, Key: stored, CopySource: copySource
-    }));
-    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: pending }));
-  } catch (error) {
-    if (error.$metadata?.httpStatusCode !== 404) throw error;
-    await getVerifiedObject(stored, { contentType, size });
+  if (!storageConfigured) throw new Error('Cloudinary storage is not configured.');
+  const pendingKey = attachmentKey({ conversationId, userId, attachmentId, contentType, pending: true });
+  const storedKey = attachmentKey({ conversationId, userId, attachmentId, contentType });
+  const pending = assetFromKey(pendingKey);
+  const stored = assetFromKey(storedKey);
+  const pendingResult = await findAsset(pending);
+  if (pendingResult) {
+    validateAsset(pendingResult, { resourceType: pending.resourceType, contentType, size });
+    try {
+      await cloudinary.uploader.rename(pending.publicId, stored.publicId, undefined, {
+        resource_type: pending.resourceType, type: 'authenticated', to_type: 'authenticated',
+        overwrite: false, invalidate: true
+      });
+    } catch (error) {
+      if (error.http_code !== 409) throw error;
+      await verifyAsset(stored, { contentType, size });
+      await cloudinary.uploader.destroy(pending.publicId, {
+        resource_type: pending.resourceType, type: 'authenticated', invalidate: true
+      });
+    }
+  } else {
+    await verifyAsset(stored, { contentType, size });
   }
-  return stored;
+  return storedKey;
 }
 
 export async function createDownloadUrl({ key, fileName, contentType, download = false }) {
-  if (!client) throw new Error('Cloudflare R2 storage is not configured.');
-  const safeAsciiName = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-  const disposition = !download && (contentType.startsWith('image/') || contentType.startsWith('video/'))
-    ? `inline; filename="${safeAsciiName}"`
-    : `attachment; filename="${safeAsciiName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
-  return getSignedUrl(client, new GetObjectCommand({
-    Bucket: bucket, Key: key, ResponseContentType: contentType,
-    ResponseContentDisposition: disposition
-  }), { expiresIn: 300 });
+  if (!storageConfigured) throw new Error('Cloudinary storage is not configured.');
+  const asset = assetFromKey(key);
+  const format = fileFormats.get(contentType);
+  if (!format) throw new Error('Stored upload content type is invalid.');
+  return cloudinary.utils.private_download_url(asset.publicId, format, {
+    resource_type: asset.resourceType,
+    type: 'authenticated',
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    attachment: download
+  });
 }
 
 export async function deleteStoredAttachments(keys) {
-  if (!client) throw new Error('Cloudflare R2 storage is not configured.');
-  await Promise.all([...new Set(keys)].map((key) =>
-    client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }))
-  ));
+  if (!storageConfigured) throw new Error('Cloudinary storage is not configured.');
+  await Promise.all([...new Set(keys)].map(async (key) => {
+    const asset = assetFromKey(key);
+    const result = await cloudinary.uploader.destroy(asset.publicId, {
+      resource_type: asset.resourceType, type: 'authenticated', invalidate: true
+    });
+    if (!['ok', 'not found'].includes(result.result)) {
+      throw new Error(`Cloudinary could not delete an uploaded asset (${result.result}).`);
+    }
+  }));
 }

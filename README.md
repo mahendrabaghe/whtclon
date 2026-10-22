@@ -9,9 +9,9 @@ ConnectX is a small, full-stack, one-to-one chat and WebRTC calling application.
 - Authenticated conversation membership checks for REST and Socket.IO actions
 - Persistent text messages, history pagination, typing indicators, unread counts, read receipts, and author-only message deletion
 - Presence updates, profile display-name/about/avatar editing, and conversation search
-- Optional JPEG/PNG/WebP avatar uploads through the configured private R2 bucket, alongside existing HTTPS avatar URLs
+- Optional JPEG/PNG/WebP avatar uploads through Cloudinary authenticated assets, alongside existing HTTPS avatar URLs
 - Audio/video WebRTC calls with accept/reject/end, mic/camera toggles, camera switching, call duration, and TURN credential generation for coturn-compatible providers
-- Private file sharing through Cloudflare R2 presigned uploads/downloads, with membership checks, upload progress, previews, and a 25 MB default file limit
+- Private file sharing through Cloudinary authenticated uploads/downloads, with membership checks, upload progress, previews, and a 25 MB default file limit
 - Security headers, CORS allow-list, request size limits, authentication rate limits, and socket message throttling
 
 File and profile-image uploads require external provider configuration and may incur usage charges. They return explicit configuration errors until enabled. Existing HTTPS profile-image URLs remain supported. Calls are not recorded or stored.
@@ -41,9 +41,9 @@ The build step copies the Socket.IO browser client and its license into `public/
 
 - Create a Render Web Service from this repository; use `npm install` as the build command and `npm start` as the start command.
 - Configure `MONGODB_URI`, `JWT_SECRET`, `FRONTEND_ORIGINS`, and any optional settings from `.env.example` in Render's environment settings. Never commit `.env`.
-- For file and profile-image sharing, create a private Cloudflare R2 bucket and an S3 API token limited to that bucket. Set `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and optionally `MAX_UPLOAD_SIZE_BYTES` (up to 25 MB) on the server. Do not set these in frontend configuration. Profile images are limited to 5 MB and JPEG, PNG, or WebP.
-- Configure bucket CORS to allow your exact frontend origins, the `PUT` method, and the `Content-Type` request header. Add an R2 lifecycle rule to expire unclaimed objects under the `pending/` prefix after one day; completed chat and profile uploads are moved to `attachments/` and `avatars/`, respectively.
-- R2 uploads are direct from the browser and signed for five minutes; each chat participant receives short-lived private download links only after a membership check. Storage and transfer may be billed by Cloudflare; review its current pricing and quotas first.
+- For file and profile-image sharing, create a Cloudinary account and set `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET`, plus optionally `MAX_UPLOAD_SIZE_BYTES` (up to 25 MB), on the server. Do not set these in frontend configuration. Profile images are limited to 5 MB and JPEG, PNG, or WebP.
+- Uploads are sent directly from the browser to Cloudinary using server-signed requests and authenticated assets. The server verifies uploaded file size and format; each chat participant receives a short-lived private download link only after a membership check. Completed assets are renamed out of the `pending_` prefix so unclaimed pending uploads can be cleaned up from the Cloudinary Media Library. Storage and transfer may be billed by Cloudinary; review its current pricing and quotas first.
+- Switching from R2 does not move existing objects or update their database keys; migrate existing attachments and profile images separately before removing the old bucket if they need to remain available.
 - If hosting the frontend on GitHub Pages, set `FRONTEND_ORIGINS` to the exact Pages origin, for example `https://your-user.github.io`. For a project site, the origin is still the domain root, not the repository subpath.
 - Render provides HTTPS. Use only HTTPS origins in production. The app uses bearer tokens in `sessionStorage`, never in URLs; same-origin policies and the Content Security Policy reduce exposure, but an XSS flaw could still access a browser-held bearer token.
 - Database access is protected by conversation membership checks. Configure MongoDB Atlas network access and a least-privilege database user for the Render service.

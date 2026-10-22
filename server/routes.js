@@ -123,7 +123,7 @@ api.patch('/profile', asyncHandler(async (req, res) => {
 
 api.post('/profile/avatar-upload', uploadLimit, asyncHandler(async (req, res) => {
   if (!isStorageConfigured()) {
-    return res.status(503).json({ error: 'Profile picture uploads are not configured. Set the Cloudflare R2 environment variables on the server.' });
+    return res.status(503).json({ error: 'Profile picture uploads are not configured. Set the Cloudinary environment variables on the server.' });
   }
   const { contentType, size } = req.body || {};
   if (!profileImageTypes.has(contentType) || !Number.isSafeInteger(size) ||
@@ -345,7 +345,7 @@ api.post('/conversations/:id/leave', asyncHandler(async (req, res) => {
 }));
 
 api.post('/conversations/:id/uploads', uploadLimit, asyncHandler(async (req, res) => {
-  if (!isStorageConfigured()) return res.status(503).json({ error: 'File sharing is not configured. Set the Cloudflare R2 environment variables on the server.' });
+  if (!isStorageConfigured()) return res.status(503).json({ error: 'File sharing is not configured. Set the Cloudinary environment variables on the server.' });
   await requireMember(req.params.id, req.user._id);
   const { fileName, contentType, size } = req.body || {};
   const safeFileName = sanitizeFileName(fileName);

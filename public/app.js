@@ -543,21 +543,27 @@ function makeUploadStatus(file) {
   return { item, label, progress };
 }
 
-function putFile(uploadUrl, headers, file, onProgress) {
+function uploadForm(fields, file) {
+  const form = new FormData();
+  for (const [name, value] of Object.entries(fields)) form.append(name, String(value));
+  form.append('file', file);
+  return form;
+}
+
+function putFile(uploadUrl, fields, file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', uploadUrl);
-    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.open('POST', uploadUrl);
     xhr.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed (HTTP ${xhr.status || 'network error'}). Check the storage bucket CORS settings and try again.`));
+      else reject(new Error(`Upload failed (HTTP ${xhr.status || 'network error'}). Check Cloudinary configuration and try again.`));
     });
-    xhr.addEventListener('error', () => reject(new Error('Upload failed. Check your connection and the storage bucket CORS settings.')));
+    xhr.addEventListener('error', () => reject(new Error('Upload failed. Check your connection and Cloudinary configuration.')));
     xhr.addEventListener('abort', () => reject(new Error('Upload was cancelled.')));
-    xhr.send(file);
+    xhr.send(uploadForm(fields, file));
   });
 }
 
@@ -578,7 +584,7 @@ async function uploadFiles(files, conversationId) {
         body: JSON.stringify({ fileName: file.name, contentType: file.type, size: file.size })
       });
       if (progress) progress.label.textContent = `Uploading ${file.name}`;
-      await putFile(upload.uploadUrl, upload.headers, file, (value) => {
+      await putFile(upload.uploadUrl, upload.fields, file, (value) => {
         if (progress) progress.progress.value = value;
       });
       if (progress) progress.label.textContent = `Sending ${file.name}`;
@@ -995,7 +1001,7 @@ async function editProfile(event) {
         method: 'POST', body: JSON.stringify({ contentType: avatarFile.type, size: avatarFile.size })
       });
       const uploaded = await fetch(upload.uploadUrl, {
-        method: 'PUT', headers: upload.headers, body: avatarFile
+        method: 'POST', body: uploadForm(upload.fields, avatarFile)
       });
       if (!uploaded.ok) throw new Error('Could not upload the profile picture. Please try again.');
       data = await request('/profile/avatar', {

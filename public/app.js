@@ -36,7 +36,8 @@ const iconPaths = {
   sparkle: '<path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/><path d="m19 15 .9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15Z"/>',
   arrowLeft: '<path d="m15 18-6-6 6-6"/><path d="M9 12h12"/>',
   share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.7 10.7 6.6-4.4m-6.6 7 6.6 4.4"/>',
-  phone: '<path d="M7 3h3l2 5-2 2a15 15 0 0 0 4 4l2-2 5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 5 5a2 2 0 0 1 2-2Z"/>',
+  headset: '<path d="M3 13v-1a9 9 0 0 1 18 0v1"/><path d="M5 13h2a2 2 0 0 1 2 2v3H6a3 3 0 0 1-3-3v-2Zm14 0h-2a2 2 0 0 0-2 2v3h3a3 3 0 0 0 3-3v-2Z"/><path d="M15 19a4 4 0 0 1-3 1h-1"/>',
+  callEnd: '<path d="M7 3h3l2 5-2 2a15 15 0 0 0 4 4l2-2 5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 5 5a2 2 0 0 1 2-2Z"/>',
   video: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
@@ -240,7 +241,7 @@ function renderChatPanel(announce = false) {
       <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span></div>
       <div class="header-actions">
         <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>${icon('share')}</button>
-        <button class="icon-button call-action audio-action" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>${icon('phone')}</button>
+        <button class="icon-button call-action audio-action" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>${icon('headset')}</button>
         <button class="icon-button call-action video-action" id="video-call" type="button" aria-label="Start video call" title="Video call" ${person ? '' : 'disabled'}>${icon('video')}</button>
         <button class="icon-button" id="leave-chat" type="button" aria-label="Leave conversation" title="Leave conversation">${icon('more')}</button>
         ${conversation.createdBy === state.user._id ? `<button class="icon-button" id="revoke-invite" type="button" aria-label="Revoke invitation" title="Revoke invitation">${icon('ban')}</button>` : ''}
@@ -1161,7 +1162,7 @@ function showCallScreen(status) {
       <button class="call-control" id="toggle-mic" aria-label="Mute microphone" title="Mute microphone">${icon('mic')}</button>
       ${video ? `<button class="call-control" id="toggle-camera" aria-label="Turn camera off" title="Turn camera off">${icon('camera')}</button>` : ''}
       ${video ? `<button class="call-control" id="switch-camera" aria-label="Switch camera" title="Switch camera">${icon('switch')}</button>` : ''}
-      <button class="call-control end" id="end-call" aria-label="End call" title="End call">${icon('phone', 'call-end-icon')}</button>
+      <button class="call-control end" id="end-call" aria-label="End call" title="End call">${icon('callEnd', 'call-end-icon')}</button>
     </div>`;
   const localVideo = document.getElementById('local-video');
   if (localVideo && state.call.localStream) localVideo.srcObject = state.call.localStream;

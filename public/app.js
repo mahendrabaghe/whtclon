@@ -66,6 +66,7 @@ function renderAuth(register = false, method = 'email') {
   document.title = method === 'phone' ? 'Phone verification | ConnectX' : (register ? 'Create account | ConnectX' : 'Sign in | ConnectX');
   const inviteToken = inviteFromUrl();
   let otpSent = false;
+  let sendCode;
   let countdownTimer;
   root.innerHTML = `
     <section class="auth-wrap">
@@ -150,7 +151,7 @@ function renderAuth(register = false, method = 'email') {
         }
       }, 1000);
     };
-    const sendCode = async () => {
+    sendCode = async () => {
       await request('/auth/phone/send-otp', {
         method: 'POST', body: JSON.stringify({ phoneNumber: phoneValue() })
       });

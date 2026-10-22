@@ -6,7 +6,7 @@ import { config } from './config.js';
 import { authenticateToken, issueToken } from './auth.js';
 import { Conversation, Invitation, Message, User } from './models.js';
 import { findValidInvitation, hashInviteToken, requireMember } from './security.js';
-import { notifyConversationMemberLeft } from './socket.js';
+import { broadcastConversationMessage, notifyConversationMemberLeft } from './socket.js';
 import {
   createDownloadUrl, createProfileImageUploadUrl, createUploadUrl, deleteStoredAttachments,
   isStorageConfigured, completeProfileImageUpload
@@ -358,6 +358,88 @@ api.post('/conversations/:id/uploads', uploadLimit, asyncHandler(async (req, res
   });
   res.set('Cache-Control', 'no-store');
   return res.status(201).json({ ...upload, fileName: safeFileName, contentType, size });
+}));
+
+api.post('/conversations/:id/uploads/:attachmentId/send', uploadLimit, asyncHandler(async (req, res) => {
+  if (!isStorageConfigured()) return res.status(503).json({ error: 'File sharing is not configured. Set the Cloudinary environment variables on the server.' });
+  const conversation = await requireMember(req.params.id, req.user._id);
+  const { fileName, contentType, size, clientMessageId } = req.body || {};
+  const safeFileName = sanitizeFileName(fileName);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.attachmentId) ||
+      !safeFileName || !allowedAttachmentTypes.has(contentType) || !Number.isSafeInteger(size) ||
+      size < 1 || size > config.maxUploadSizeBytes ||
+      typeof clientMessageId !== 'string' || !/^[\w-]{8,80}$/.test(clientMessageId)) {
+    return res.status(400).json({ error: 'The attachment details are invalid.' });
+  }
+  const matchesRequest = (message) =>
+    String(message.conversationId) === String(conversation._id) &&
+    !message.deletedAt && message.text === '' && message.attachments.length === 1 &&
+    message.attachments.some((attachment) =>
+      attachment.attachmentId === req.params.attachmentId &&
+      attachment.fileName === safeFileName &&
+      attachment.contentType === contentType &&
+      attachment.size === size
+    );
+  const payloadFor = (message) => ({
+    _id: String(message._id),
+    conversationId: String(message.conversationId),
+    sender: { _id: req.user.id, displayName: req.user.displayName, username: req.user.username },
+    text: message.deletedAt ? '' : message.text,
+    attachments: message.deletedAt ? [] : message.attachments.map(({ attachmentId, fileName, contentType, size: attachmentSize }) => ({
+      attachmentId, fileName, contentType, size: attachmentSize
+    })),
+    createdAt: message.createdAt,
+    clientMessageId,
+    readBy: message.readBy.map(String)
+  });
+  const findExisting = async () => {
+    const message = await Message.findOne({ senderId: req.user._id, clientMessageId });
+    if (!message) return null;
+    if (!matchesRequest(message)) {
+      const error = new Error('Message identifier has already been used.');
+      error.status = 409;
+      throw error;
+    }
+    return payloadFor(message);
+  };
+  const respondWithExisting = (payload) => {
+    broadcastConversationMessage(conversation._id, payload);
+    return res.json({ ok: true, message: payload });
+  };
+
+  const existingPayload = await findExisting();
+  if (existingPayload) return respondWithExisting(existingPayload);
+
+  const key = await storeUploadedAttachment({
+    conversationId: String(conversation._id),
+    userId: req.user.id,
+    attachmentId: req.params.attachmentId,
+    contentType,
+    size
+  });
+  let message;
+  try {
+    message = await Message.create({
+      conversationId: conversation._id,
+      senderId: req.user._id,
+      text: '',
+      attachments: [{ attachmentId: req.params.attachmentId, fileName: safeFileName, contentType, size, key }],
+      clientMessageId,
+      readBy: [req.user._id]
+    });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    const duplicatePayload = await findExisting();
+    if (duplicatePayload) return respondWithExisting(duplicatePayload);
+    throw error;
+  }
+  await Conversation.updateOne(
+    { _id: conversation._id },
+    { $max: { lastMessageAt: message.createdAt } }
+  );
+  const payload = payloadFor(message);
+  broadcastConversationMessage(conversation._id, payload);
+  return res.status(201).json({ ok: true, message: payload });
 }));
 
 api.get('/conversations/:id/messages/:messageId/attachments/:attachmentId', asyncHandler(async (req, res) => {

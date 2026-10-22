@@ -557,7 +557,7 @@ function uploadForm(fields, file) {
   return form;
 }
 
-function putFile(uploadUrl, fields, file, onProgress) {
+function putFile(uploadUrl, fields, file, onProgress = () => {}) {
   return new Promise((resolve, reject) => {
     if (typeof uploadUrl !== 'string' || !/^https:\/\/api\.cloudinary\.com\/v1_1\/[^/]+\/(image|video|raw)\/upload$/.test(uploadUrl)) {
       reject(new Error('The upload service returned an invalid Cloudinary upload URL. Redeploy the backend and check its Cloudinary configuration.'));
@@ -572,15 +572,25 @@ function putFile(uploadUrl, fields, file, onProgress) {
     }
     const xhr = new XMLHttpRequest();
     xhr.open('POST', uploadUrl);
+    xhr.timeout = 120000;
     xhr.upload.addEventListener('progress', (event) => {
       if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve();
-      else reject(new Error(`Upload failed (HTTP ${xhr.status || 'network error'}). Check Cloudinary configuration and try again.`));
+      else {
+        let message = '';
+        try {
+          message = JSON.parse(xhr.responseText).error?.message || '';
+        } catch { /* Cloudinary may return a non-JSON error response. */ }
+        reject(new Error(message
+          ? `Cloudinary upload failed: ${message}`
+          : `Upload failed (HTTP ${xhr.status || 'network error'}). Check Cloudinary configuration and try again.`));
+      }
     });
     xhr.addEventListener('error', () => reject(new Error('Upload failed. Check your connection and Cloudinary configuration.')));
     xhr.addEventListener('abort', () => reject(new Error('Upload was cancelled.')));
+    xhr.addEventListener('timeout', () => reject(new Error('Cloudinary upload timed out. Check your connection and try again.')));
     xhr.send(body);
   });
 }
@@ -606,18 +616,25 @@ async function uploadFiles(files, conversationId) {
         if (progress) progress.progress.value = value;
       });
       if (progress) progress.label.textContent = `Sending ${file.name}`;
-      const result = await socketEmitAck('message:send', {
-        conversationId,
-        text: '',
-        clientMessageId: crypto.randomUUID(),
-        attachments: [{
-          attachmentId: upload.attachmentId,
+      const result = await request(`/conversations/${encodeURIComponent(conversationId)}/uploads/${encodeURIComponent(upload.attachmentId)}/send`, {
+        method: 'POST',
+        body: JSON.stringify({
           fileName: upload.fileName,
           contentType: upload.contentType,
-          size: upload.size
-        }]
-      }, 125000);
+          size: upload.size,
+          clientMessageId: crypto.randomUUID()
+        })
+      });
       if (!result?.ok) throw new Error(result?.error || 'The file was uploaded but could not be sent.');
+      const conversation = state.conversations.find((item) => item._id === conversationId);
+      if (conversation) {
+        conversation.lastMessage = { text: 'Attachment', createdAt: result.message.createdAt };
+        conversation.lastMessageAt = result.message.createdAt;
+      }
+      renderMessage(result.message);
+      const messages = document.getElementById('messages');
+      if (messages) messages.scrollTop = messages.scrollHeight;
+      renderChatList();
       if (progress) {
         progress.label.textContent = `Sent ${file.name}`;
         progress.progress.value = 100;
@@ -1021,10 +1038,9 @@ async function editProfile(event) {
       if (typeof upload.uploadUrl !== 'string' || !upload.fields || typeof upload.fields !== 'object') {
         throw new Error('The upload service response is missing Cloudinary signing fields. Redeploy the backend with the latest Cloudinary upload support.');
       }
-      const uploaded = await fetch(upload.uploadUrl, {
-        method: 'POST', body: uploadForm(upload.fields, avatarFile)
-      });
-      if (!uploaded.ok) throw new Error('Could not upload the profile picture. Please try again.');
+      submit.textContent = 'Uploading picture…';
+      await putFile(upload.uploadUrl, upload.fields, avatarFile);
+      submit.textContent = 'Saving…';
       data = await request('/profile/avatar', {
         method: 'POST',
         body: JSON.stringify({ key: upload.key, contentType: avatarFile.type, size: avatarFile.size, displayName, about })

@@ -49,6 +49,10 @@ export async function notifyConversationMemberLeft(conversationId, userId, remai
   }
 }
 
+export function broadcastConversationMessage(conversationId, message) {
+  socketServer?.to(`conversation:${idString(conversationId)}`).emit('message:new', message);
+}
+
 export function configureSocket(server) {
   const io = new Server(server, {
     cors: { origin: config.origins, methods: ['GET', 'POST'] },

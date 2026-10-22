@@ -544,6 +544,13 @@ function makeUploadStatus(file) {
 }
 
 function uploadForm(fields, file) {
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    throw new Error('The upload service response is missing Cloudinary signing fields. Redeploy the backend with the latest Cloudinary upload support.');
+  }
+  const requiredFields = ['api_key', 'context', 'overwrite', 'public_id', 'signature', 'timestamp', 'type'];
+  if (requiredFields.some((name) => !(name in fields))) {
+    throw new Error('The upload service returned incomplete Cloudinary signing fields. Check the backend deployment and Cloudinary configuration.');
+  }
   const form = new FormData();
   for (const [name, value] of Object.entries(fields)) form.append(name, String(value));
   form.append('file', file);
@@ -552,6 +559,17 @@ function uploadForm(fields, file) {
 
 function putFile(uploadUrl, fields, file, onProgress) {
   return new Promise((resolve, reject) => {
+    if (typeof uploadUrl !== 'string' || !/^https:\/\/api\.cloudinary\.com\/v1_1\/[^/]+\/(image|video|raw)\/upload$/.test(uploadUrl)) {
+      reject(new Error('The upload service returned an invalid Cloudinary upload URL. Redeploy the backend and check its Cloudinary configuration.'));
+      return;
+    }
+    let body;
+    try {
+      body = uploadForm(fields, file);
+    } catch (error) {
+      reject(error);
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open('POST', uploadUrl);
     xhr.upload.addEventListener('progress', (event) => {
@@ -563,7 +581,7 @@ function putFile(uploadUrl, fields, file, onProgress) {
     });
     xhr.addEventListener('error', () => reject(new Error('Upload failed. Check your connection and Cloudinary configuration.')));
     xhr.addEventListener('abort', () => reject(new Error('Upload was cancelled.')));
-    xhr.send(uploadForm(fields, file));
+    xhr.send(body);
   });
 }
 
@@ -598,7 +616,7 @@ async function uploadFiles(files, conversationId) {
           contentType: upload.contentType,
           size: upload.size
         }]
-      });
+      }, 125000);
       if (!result?.ok) throw new Error(result?.error || 'The file was uploaded but could not be sent.');
       if (progress) {
         progress.label.textContent = `Sent ${file.name}`;
@@ -1000,6 +1018,9 @@ async function editProfile(event) {
       const upload = await request('/profile/avatar-upload', {
         method: 'POST', body: JSON.stringify({ contentType: avatarFile.type, size: avatarFile.size })
       });
+      if (typeof upload.uploadUrl !== 'string' || !upload.fields || typeof upload.fields !== 'object') {
+        throw new Error('The upload service response is missing Cloudinary signing fields. Redeploy the backend with the latest Cloudinary upload support.');
+      }
       const uploaded = await fetch(upload.uploadUrl, {
         method: 'POST', body: uploadForm(upload.fields, avatarFile)
       });
@@ -1083,10 +1104,10 @@ function socketEmit(event, data) {
   if (state.socket?.connected) state.socket.emit(event, data);
 }
 
-function socketEmitAck(event, data) {
+function socketEmitAck(event, data, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     if (!state.socket?.connected) return reject(new Error('Not connected.'));
-    state.socket.timeout(10000).emit(event, data, (error, response) => error ? reject(error) : resolve(response));
+    state.socket.timeout(timeoutMs).emit(event, data, (error, response) => error ? reject(error) : resolve(response));
   });
 }
 

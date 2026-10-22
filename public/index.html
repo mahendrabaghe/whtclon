@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="theme-color" content="#f4f7f5">
+    <meta name="description" content="ConnectX — private conversations, wherever you are.">
+    <title>ConnectX — Stay close</title>
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./vendor/socket.io.min.js" defer></script>
+    <script src="./config.js" defer></script>
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <main id="app" aria-live="polite">
+      <section class="loading-screen"><span class="brand-mark">C</span><p>Connecting you…</p></section>
+    </main>
+    <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <dialog id="call-dialog" class="call-dialog">
+      <div class="call-dialog-icon">☎</div>
+      <p class="eyebrow" id="call-label">INCOMING CALL</p>
+      <h2 id="call-name">Someone is calling</h2>
+      <p id="call-kind">Audio call</p>
+      <div class="call-actions">
+        <button class="button danger" id="reject-call" type="button">Decline</button>
+        <button class="button primary" id="accept-call" type="button">Accept</button>
+      </div>
+    </dialog>
+  </body>
+</html>

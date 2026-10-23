@@ -127,7 +127,14 @@ function attachmentKey({ conversationId, userId, attachmentId, contentType, pend
 
 async function findAsset({ resourceType, publicId }) {
   try {
-    return await cloudinary.api.resource(publicId, { resource_type: resourceType, type: 'authenticated' });
+    return await new Promise((resolve, reject) => {
+      cloudinary.api.resource(publicId, (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }, {
+        resource_type: resourceType, type: 'authenticated'
+      });
+    });
   } catch (error) {
     if (error.http_code === 404) return null;
     throw error;

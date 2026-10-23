@@ -20,7 +20,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       fontSrc: ["'self'", 'data:'],
       connectSrc: ["'self'", ...config.origins, 'wss:', 'https:'],
-      imgSrc: ["'self'", 'data:', 'https:'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
       mediaSrc: ["'self'", 'blob:', 'https:'],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"]
@@ -33,7 +33,8 @@ app.use(cors({
     return callback(new Error('Origin is not allowed by CORS.'));
   },
   methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-ConnectX-Request'],
+  credentials: true
 }));
 app.use(express.json({ limit: '16kb', strict: true }));
 app.use('/api', api);

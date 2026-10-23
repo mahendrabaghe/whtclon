@@ -4,6 +4,7 @@ const callDialog = document.getElementById('call-dialog');
 const joinDialog = document.getElementById('join-dialog');
 const profileDialog = document.getElementById('profile-dialog');
 const tokenKey = 'connectx.session';
+const loggedOutKey = 'connectx.logged-out';
 const state = {
   token: sessionStorage.getItem(tokenKey),
   user: null,
@@ -30,8 +31,9 @@ let socketClientPromise;
 let attachmentObserver;
 let attachmentLoadQueue = new WeakMap();
 let profilePreviewUrl;
-let profileInitialAvatarUrl = '';
+let profileInitialAbout = '';
 let profileAvatarRemoveRequested = false;
+let bootPromise;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -45,7 +47,6 @@ const iconPaths = {
   callEnd: '<path d="M7 3h3l2 5-2 2a15 15 0 0 0 4 4l2-2 5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 5 5a2 2 0 0 1 2-2Z"/>',
   video: '<rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
-  ban: '<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   send: '<path d="m22 2-7 20-4-9-9-4 20-7ZM22 2 11 13"/>',
   expand: '<path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3"/>',
@@ -217,13 +218,28 @@ function bindDialogControls() {
   });
   document.getElementById('profile-close').addEventListener('click', () => profileDialog.close());
   document.getElementById('profile-cancel').addEventListener('click', () => profileDialog.close());
+  document.getElementById('profile-about-open').addEventListener('click', () => {
+    document.getElementById('about-dialog').showModal();
+  });
+  document.getElementById('about-close').addEventListener('click', () => {
+    document.getElementById('about-dialog').close();
+  });
+  document.getElementById('about-done').addEventListener('click', () => {
+    document.getElementById('about-dialog').close();
+  });
+  document.getElementById('about-dialog').addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) event.currentTarget.close();
+  });
   document.getElementById('profile-avatar-file').addEventListener('change', (event) => {
     const file = event.currentTarget.files?.[0];
+    const contentType = file && resolveFileContentType(
+      file, new Set(profileImageTypesByExtension.values()), profileImageTypesByExtension
+    );
     const feedback = document.getElementById('profile-feedback');
     feedback.textContent = '';
     feedback.classList.remove('error');
     if (!file) return;
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    if (!contentType || file.size < 1 || file.size > 5 * 1024 * 1024) {
       event.currentTarget.value = '';
       feedback.textContent = 'Choose a JPEG, PNG, or WebP image up to 5 MB.';
       feedback.classList.add('error');
@@ -240,17 +256,12 @@ function bindDialogControls() {
   });
   document.getElementById('profile-avatar-remove').addEventListener('click', () => {
     document.getElementById('profile-avatar-file').value = '';
-    document.getElementById('profile-avatar-url').value = '';
     profileAvatarRemoveRequested = true;
     document.getElementById('profile-avatar-remove').disabled = true;
     if (profilePreviewUrl) URL.revokeObjectURL(profilePreviewUrl);
     profilePreviewUrl = null;
     document.getElementById('profile-avatar-preview').innerHTML =
       avatarMarkup({ ...state.user, avatarUrl: '', hasAvatar: false }, 'profile-preview-avatar');
-  });
-  document.getElementById('profile-avatar-url').addEventListener('input', (event) => {
-    document.getElementById('profile-avatar-remove').disabled =
-      !event.currentTarget.value.trim() && !state.user.avatarUrl && !state.user.hasAvatar;
   });
   document.getElementById('profile-form').addEventListener('submit', editProfile);
   profileDialog.addEventListener('close', () => {
@@ -274,15 +285,40 @@ function notify(message, error = false) {
 async function request(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+  if (!['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase())) {
+    headers.set('X-ConnectX-Request', '1');
+  }
   if (state.token) headers.set('Authorization', `Bearer ${state.token}`);
-  const response = await fetch(`${API}/api${path}`, { ...options, headers });
+  const response = await fetch(`${API}/api${path}`, {
+    ...options, headers, credentials: 'include'
+  });
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && state.user &&
+      !['/auth/login', '/auth/register', '/auth/logout'].includes(path)) {
+    expireSession();
+  }
   if (!response.ok) {
     const error = new Error(data.error || `Request failed (${response.status}).`);
     error.status = response.status;
     throw error;
   }
   return data;
+}
+
+function renderSessionRetry(error) {
+  root.innerHTML = `
+    <section class="loading-screen" aria-live="polite">
+      <span class="brand-mark">C</span>
+      <h2>Can’t connect to ConnectX</h2>
+      <p id="session-retry-message"></p>
+      <button class="button primary" id="session-retry" type="button">Retry</button>
+    </section>`;
+  document.getElementById('session-retry-message').textContent =
+    error?.message || 'Check your connection and retry. Your saved session has not been cleared.';
+  document.getElementById('session-retry').addEventListener('click', () => {
+    root.innerHTML = '<section class="loading-screen"><span class="brand-mark">C</span><p>Connecting you…</p></section>';
+    void boot();
+  });
 }
 
 function renderAuth(register = false) {
@@ -321,11 +357,12 @@ function renderAuth(register = false) {
       const result = await request(`/auth/${register ? 'register' : 'login'}`, {
         method: 'POST', body: JSON.stringify(body)
       });
-      state.token = result.token;
       state.user = result.user;
-      sessionStorage.setItem(tokenKey, result.token);
+      state.token = null;
+      sessionStorage.removeItem(tokenKey);
+      localStorage.removeItem(loggedOutKey);
       notify(register ? 'Your account is ready.' : 'Signed in successfully.');
-      startApp();
+      void boot();
     } catch (error) {
       notify(error.message, true);
     } finally {
@@ -389,7 +426,7 @@ function renderShell(announce = false) {
   document.getElementById('theme-toggle').addEventListener('click', cycleTheme);
   updateThemeButton();
   document.getElementById('edit-profile').addEventListener('click', openProfileDialog);
-  document.getElementById('sign-out').addEventListener('click', signOut);
+  document.getElementById('sign-out').addEventListener('click', confirmSignOut);
   document.querySelector('[data-home]')?.addEventListener('click', (event) => {
     event.preventDefault();
     if (state.call) return notify('End the call before leaving the conversation.', true);
@@ -447,11 +484,16 @@ function renderChatPanel(announce = false) {
       <span data-peer-avatar>${avatarMarkup(person)}</span>
       <div class="chat-header-info"><strong>${escapeHtml(person?.displayName || 'Waiting for someone')}</strong><span>${person ? (state.online.has(person._id) ? 'Online' : `Last seen ${formatTime(person.lastSeenAt || Date.now())}`) : 'Share an invitation to get started'}</span>${person?.about ? `<small class="chat-about">${escapeHtml(person.about)}</small>` : ''}</div>
       <div class="header-actions">
-        <button class="icon-button" id="share-invite" type="button" aria-label="Share invitation" title="Share invitation" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>${icon('share')}</button>
         <button class="icon-button call-action audio-action" id="audio-call" type="button" aria-label="Start audio call" title="Audio call" ${person ? '' : 'disabled'}>${icon('headset')}</button>
         <button class="icon-button call-action video-action" id="video-call" type="button" aria-label="Start video call" title="Video call" ${person ? '' : 'disabled'}>${icon('video')}</button>
-        <button class="icon-button" id="leave-chat" type="button" aria-label="Leave conversation" title="Leave conversation">${icon('more')}</button>
-        ${conversation.createdBy === state.user._id ? `<button class="icon-button" id="revoke-invite" type="button" aria-label="Revoke invitation" title="Revoke invitation">${icon('ban')}</button>` : ''}
+        <div class="chat-menu-wrap">
+          <button class="icon-button" id="chat-menu-toggle" type="button" aria-label="Conversation options" aria-haspopup="menu" aria-expanded="false" title="Conversation options">${icon('more')}</button>
+          <div class="chat-action-menu" id="chat-action-menu" role="menu" hidden>
+            <button id="share-invite" type="button" role="menuitem" ${conversation.createdBy === state.user._id && !person ? '' : 'disabled'}>${icon('share')}<span>Share invitation</span></button>
+            <button id="clear-chat" type="button" role="menuitem">${icon('close')}<span>Clear Chat</span></button>
+            <button id="leave-chat" type="button" role="menuitem">${icon('logout')}<span>Leave This Conversation</span></button>
+          </div>
+        </div>
       </div>
     </header>
     <div class="messages" id="messages" role="log" aria-label="Messages"></div>
@@ -459,7 +501,7 @@ function renderChatPanel(announce = false) {
     <div class="upload-status" id="upload-status" aria-live="polite" hidden></div>
     <form class="composer" id="composer">
       <input id="attachment-picker" class="visually-hidden" type="file" multiple
-        accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,application/pdf,text/plain,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/zip">
+        accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,application/pdf,text/plain,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/zip,.jpg,.jpeg,.png,.gif,.webp,.mp4,.webm,.pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip">
       <button class="icon-button attach-button" id="attach-file" type="button" aria-label="Attach file" title="Share files">${icon('plus')}</button>
       <textarea id="message-input" rows="1" maxlength="4000" placeholder="Write a message…" aria-label="Message"></textarea>
       <button class="send-button" type="submit" aria-label="Send message">${icon('send')}</button>
@@ -470,11 +512,47 @@ function renderChatPanel(announce = false) {
     state.activeId = null;
     renderShell();
   });
-  document.getElementById('share-invite').addEventListener('click', shareInvite);
   document.getElementById('audio-call').addEventListener('click', () => startCall('audio'));
   document.getElementById('video-call').addEventListener('click', () => startCall('video'));
-  document.getElementById('leave-chat').addEventListener('click', leaveConversation);
-  document.getElementById('revoke-invite')?.addEventListener('click', revokeInvitation);
+  const menuToggle = document.getElementById('chat-menu-toggle');
+  const actionMenu = document.getElementById('chat-action-menu');
+  const closeActionMenu = () => {
+    actionMenu.hidden = true;
+    menuToggle.setAttribute('aria-expanded', 'false');
+  };
+  document.getElementById('leave-chat').addEventListener('click', () => {
+    closeActionMenu();
+    void leaveConversation();
+  });
+  document.getElementById('share-invite').addEventListener('click', () => {
+    closeActionMenu();
+    void shareInvite();
+  });
+  document.getElementById('clear-chat').addEventListener('click', () => {
+    closeActionMenu();
+    void clearConversationHistory();
+  });
+  menuToggle.addEventListener('click', () => {
+    const open = actionMenu.hidden;
+    actionMenu.hidden = !open;
+    menuToggle.setAttribute('aria-expanded', String(open));
+  });
+  menuToggle.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !actionMenu.hidden) {
+      closeActionMenu();
+      menuToggle.focus();
+    }
+  });
+  panel.addEventListener('click', (event) => {
+    if (event.target.closest('#chat-menu-toggle, #chat-action-menu')) return;
+    closeActionMenu();
+  });
+  actionMenu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      closeActionMenu();
+      menuToggle.focus();
+    }
+  });
   const picker = document.getElementById('attachment-picker');
   document.getElementById('attach-file').addEventListener('click', () => picker.click());
   picker.addEventListener('change', () => {
@@ -520,6 +598,28 @@ const allowedClientAttachmentTypes = new Set([
   'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/zip'
 ]);
+const attachmentTypesByExtension = new Map([
+  ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['png', 'image/png'],
+  ['gif', 'image/gif'], ['webp', 'image/webp'], ['mp4', 'video/mp4'],
+  ['webm', 'video/webm'], ['pdf', 'application/pdf'], ['txt', 'text/plain'],
+  ['csv', 'text/csv'], ['doc', 'application/msword'],
+  ['docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['xls', 'application/vnd.ms-excel'],
+  ['xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ['ppt', 'application/vnd.ms-powerpoint'],
+  ['pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ['zip', 'application/zip']
+]);
+const profileImageTypesByExtension = new Map([
+  ['jpg', 'image/jpeg'], ['jpeg', 'image/jpeg'], ['png', 'image/png'], ['webp', 'image/webp']
+]);
+
+function resolveFileContentType(file, allowedTypes, extensionTypes) {
+  const declaredType = file.type.toLowerCase().split(';', 1)[0];
+  if (allowedTypes.has(declaredType)) return declaredType;
+  const extension = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1];
+  return extensionTypes.get(extension) || '';
+}
 
 function formatFileSize(size) {
   if (size < 1024) return `${size} B`;
@@ -603,13 +703,16 @@ async function uploadFiles(files, conversationId) {
   for (const file of files) {
     const progress = makeUploadStatus(file);
     try {
-      if (!allowedClientAttachmentTypes.has(file.type) || file.size < 1 || file.size > maxClientUploadSize) {
+      const contentType = resolveFileContentType(
+        file, allowedClientAttachmentTypes, attachmentTypesByExtension
+      );
+      if (!contentType || file.size < 1 || file.size > maxClientUploadSize) {
         throw new Error(`${file.name} is not a supported file or exceeds the 25 MB limit.`);
       }
       if (progress) progress.label.textContent = `Preparing ${file.name}`;
       const upload = await request(`/conversations/${encodeURIComponent(conversationId)}/uploads`, {
         method: 'POST',
-        body: JSON.stringify({ fileName: file.name, contentType: file.type, size: file.size })
+        body: JSON.stringify({ fileName: file.name, contentType, size: file.size })
       });
       if (progress) progress.label.textContent = `Uploading ${file.name}`;
       await putFile(upload.uploadUrl, upload.fields, file, (value) => {
@@ -944,11 +1047,14 @@ async function shareInvite() {
   } catch (error) { notify(error.message, true); }
 }
 
-async function revokeInvitation() {
-  if (!confirm('Revoke all active invitation links for this conversation?')) return;
+async function clearConversationHistory() {
+  if (!confirm('Clear this conversation from your history? This only affects your account; the conversation and the other participant’s history will remain unchanged.')) return;
   try {
-    await request(`/conversations/${state.activeId}/invitations/revoke`, { method: 'POST', body: '{}' });
-    notify('Active invitation links revoked.');
+    const conversationId = state.activeId;
+    await request(`/conversations/${conversationId}/clear`, { method: 'POST', body: '{}' });
+    await refreshConversations({ render: false });
+    await renderShell();
+    notify('Chat cleared from your history.');
   } catch (error) { notify(error.message, true); }
 }
 
@@ -985,10 +1091,8 @@ async function leaveConversation() {
 }
 
 function openProfileDialog() {
-  document.getElementById('profile-display-name').value = state.user.displayName || '';
   document.getElementById('profile-about').value = state.user.about || '';
-  document.getElementById('profile-avatar-url').value = state.user.avatarUrl || '';
-  profileInitialAvatarUrl = state.user.avatarUrl || '';
+  profileInitialAbout = state.user.about || '';
   profileAvatarRemoveRequested = false;
   document.getElementById('profile-avatar-remove').disabled =
     !state.user.avatarUrl && !state.user.hasAvatar;
@@ -1000,7 +1104,7 @@ function openProfileDialog() {
   feedback.textContent = '';
   feedback.classList.remove('error');
   profileDialog.showModal();
-  document.getElementById('profile-display-name').focus();
+  document.getElementById('profile-about').focus();
 }
 
 async function editProfile(event) {
@@ -1009,16 +1113,11 @@ async function editProfile(event) {
   const submit = document.getElementById('profile-save');
   const feedback = document.getElementById('profile-feedback');
   const originalLabel = submit.textContent;
-  const displayName = document.getElementById('profile-display-name').value.trim();
   const about = document.getElementById('profile-about').value.trim();
-  const avatarUrl = document.getElementById('profile-avatar-url').value.trim();
   const avatarFile = document.getElementById('profile-avatar-file').files?.[0];
-  if (!displayName || displayName.length > 60) {
-    feedback.textContent = 'Display name must be between 1 and 60 characters.';
-    feedback.classList.add('error');
-    document.getElementById('profile-display-name').focus();
-    return;
-  }
+  const avatarContentType = avatarFile && resolveFileContentType(
+    avatarFile, new Set(profileImageTypesByExtension.values()), profileImageTypesByExtension
+  );
   if (about.length > 240) {
     feedback.textContent = 'About must be 240 characters or fewer.';
     feedback.classList.add('error');
@@ -1032,8 +1131,11 @@ async function editProfile(event) {
   try {
     let data;
     if (avatarFile) {
+      if (!avatarContentType || avatarFile.size < 1 || avatarFile.size > 5 * 1024 * 1024) {
+        throw new Error('Choose a JPEG, PNG, or WebP profile picture up to 5 MB.');
+      }
       const upload = await request('/profile/avatar-upload', {
-        method: 'POST', body: JSON.stringify({ contentType: avatarFile.type, size: avatarFile.size })
+        method: 'POST', body: JSON.stringify({ contentType: avatarContentType, size: avatarFile.size })
       });
       if (typeof upload.uploadUrl !== 'string' || !upload.fields || typeof upload.fields !== 'object') {
         throw new Error('The upload service response is missing Cloudinary signing fields. Redeploy the backend with the latest Cloudinary upload support.');
@@ -1043,12 +1145,18 @@ async function editProfile(event) {
       submit.textContent = 'Saving…';
       data = await request('/profile/avatar', {
         method: 'POST',
-        body: JSON.stringify({ key: upload.key, contentType: avatarFile.type, size: avatarFile.size, displayName, about })
+        body: JSON.stringify({
+          key: upload.key, contentType: avatarContentType, size: avatarFile.size,
+          displayName: state.user.displayName, about
+        })
       });
     } else {
-      const profileUpdate = { displayName, about };
-      if (profileAvatarRemoveRequested || avatarUrl !== profileInitialAvatarUrl) {
-        profileUpdate.avatarUrl = avatarUrl;
+      const profileUpdate = {};
+      if (about !== profileInitialAbout) profileUpdate.about = about;
+      if (profileAvatarRemoveRequested) profileUpdate.avatarUrl = '';
+      if (!Object.keys(profileUpdate).length) {
+        profileDialog.close();
+        return;
       }
       data = await request('/profile', {
         method: 'PATCH', body: JSON.stringify(profileUpdate)
@@ -1160,10 +1268,11 @@ async function connectSocket() {
     notify(`${error.message} Check your network and refresh.`, true);
     return;
   }
-  if (!state.token || state.socket) return;
+  if (state.socket) return;
   state.socket = window.io(API || location.origin, {
-    auth: { token: state.token },
-    transports: ['websocket', 'polling']
+    auth: state.token ? { token: state.token } : {},
+    transports: ['websocket', 'polling'],
+    withCredentials: true
   });
   let hasConnected = false;
   state.socket.on('connect', () => {
@@ -1180,7 +1289,13 @@ async function connectSocket() {
     }
     hasConnected = true;
   });
-  state.socket.on('connect_error', (error) => notify(error.message || 'Realtime connection failed.', true));
+  state.socket.on('connect_error', (error) => {
+    if (/invalid or expired session|account no longer exists/i.test(error.message || '')) {
+      expireSession();
+      return;
+    }
+    notify(error.message || 'Realtime connection failed.', true);
+  });
   state.socket.on('message:new', (message) => {
     const conversation = state.conversations.find((item) => item._id === message.conversationId);
     if (conversation) {
@@ -1608,6 +1723,34 @@ function endCall(notifyPeer) {
 }
 
 function signOut() {
+  localStorage.setItem(loggedOutKey, '1');
+  const logoutRequest = request('/auth/logout', { method: 'POST', body: '{}' });
+  state.socket?.disconnect();
+  state.socket = null;
+  endCall(false);
+  stopTyping();
+  state.token = null;
+  state.user = null;
+  state.conversations = [];
+  state.activeId = null;
+  state.online.clear();
+  state.messageLoadGeneration++;
+  state.loadingMessageHistory = false;
+  state.loadingHistoryConversation = null;
+  state.pendingLiveMessages.clear();
+  state.iceServers = null;
+  state.iceServersAt = 0;
+  state.iceServersPromise = null;
+  state.pendingAnnouncement = null;
+  sessionStorage.removeItem(tokenKey);
+  renderAuth();
+  void logoutRequest.catch(() => notify(
+    'Signed out on this device. Server logout could not be confirmed; automatic session restore is disabled here.',
+    true
+  ));
+}
+
+function expireSession() {
   state.socket?.disconnect();
   state.socket = null;
   endCall(false);
@@ -1629,12 +1772,19 @@ function signOut() {
   renderAuth();
 }
 
+function confirmSignOut() {
+  if (confirm('Log out of ConnectX?')) signOut();
+}
+
 async function startApp() {
   try {
     if (!state.user) {
       const data = await request('/auth/me');
       state.user = data.user;
     }
+    state.token = null;
+    sessionStorage.removeItem(tokenKey);
+    localStorage.removeItem(loggedOutKey);
     const conversationsPromise = refreshConversations();
     void connectSocket();
     await conversationsPromise;
@@ -1654,15 +1804,28 @@ async function startApp() {
       sessionStorage.removeItem(tokenKey);
       state.token = null;
       state.user = null;
+      state.socket?.disconnect();
+      state.socket = null;
+      renderAuth();
+      return;
     }
-    renderAuth();
-    notify(error.message || 'Could not load ConnectX. Check your connection and try again.', true);
+    renderSessionRetry(error);
   }
 }
 
 async function boot() {
-  if (!state.token) return renderAuth();
-  await startApp();
+  if (bootPromise) return bootPromise;
+  if (localStorage.getItem(loggedOutKey) === '1') {
+    sessionStorage.removeItem(tokenKey);
+    state.token = null;
+    return renderAuth();
+  }
+  bootPromise = startApp();
+  try {
+    await bootPromise;
+  } finally {
+    bootPromise = null;
+  }
 }
 
 bindDialogControls();

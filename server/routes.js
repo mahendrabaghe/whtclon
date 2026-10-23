@@ -3,7 +3,9 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { rateLimit } from 'express-rate-limit';
 import { config } from './config.js';
-import { authenticateToken, issueToken } from './auth.js';
+import {
+  authenticateToken, clearSessionCookie, issueToken, setSessionCookie
+} from './auth.js';
 import { Conversation, Invitation, Message, User } from './models.js';
 import { findValidInvitation, hashInviteToken, requireMember } from './security.js';
 import { broadcastConversationMessage, notifyConversationMemberLeft } from './socket.js';
@@ -43,7 +45,10 @@ api.post('/auth/register', authLimit, asyncHandler(async (req, res) => {
   try {
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await User.create({ username, displayName: displayName.trim(), email, passwordHash });
-    return res.status(201).json({ token: issueToken(user), user: accountUser(user) });
+    const token = issueToken(user);
+    setSessionCookie(req, res, token);
+    res.set('Cache-Control', 'no-store');
+    return res.status(201).json({ token, user: accountUser(user) });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: 'That username or email is already registered.' });
     throw error;
@@ -63,23 +68,38 @@ api.post('/auth/login', authLimit, asyncHandler(async (req, res) => {
   if (!user || !await bcrypt.compare(password, user.passwordHash)) {
     return res.status(401).json({ error: 'Email/username or password is incorrect.' });
   }
-  return res.json({ token: issueToken(user), user: accountUser(user) });
+  const token = issueToken(user);
+  setSessionCookie(req, res, token);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ token, user: accountUser(user) });
 }));
 
-api.get('/avatars/:userId', asyncHandler(async (req, res) => {
+api.post('/auth/logout', (req, res) => {
+  if (req.get('x-connectx-request') !== '1') {
+    return res.status(403).json({ error: 'The request could not be verified. Refresh and try again.' });
+  }
+  clearSessionCookie(req, res);
+  res.set('Cache-Control', 'no-store');
+  return res.json({ loggedOut: true });
+});
+
+api.get('/avatars/:userId', authenticateToken, asyncHandler(async (req, res) => {
   if (!/^[a-f\d]{24}$/i.test(req.params.userId)) return res.status(404).end();
   const user = await User.findById(req.params.userId).select('+avatarKey');
   if (!user?.avatarKey) return res.status(404).end();
   const url = await createDownloadUrl({
     key: user.avatarKey, fileName: 'connectx-profile-image', contentType: user.avatarContentType || 'image/jpeg'
   });
-  res.set('Cache-Control', 'public, max-age=240');
+  res.set('Cache-Control', 'private, max-age=240');
   return res.redirect(302, url);
 }));
 
 api.use(authenticateToken);
 
-api.get('/auth/me', (req, res) => res.json({ user: accountUser(req.user) }));
+api.get('/auth/me', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json({ user: accountUser(req.user) });
+});
 
 api.patch('/profile', asyncHandler(async (req, res) => {
   const { displayName, about, avatarUrl } = req.body || {};
@@ -245,28 +265,32 @@ api.get('/conversations', asyncHandler(async (req, res) => {
     .sort({ lastMessageAt: -1 })
     .populate('participantIds', 'displayName username avatarUrl avatarKey avatarContentType about lastSeenAt updatedAt');
   const conversationIds = conversations.map((conversation) => conversation._id);
+  const visibleMessageFilters = conversations.map((conversation) => ({
+    conversationId: conversation._id,
+    createdAt: { $gt: conversation.lastClearedAt?.get(req.user.id) || new Date(0) }
+  }));
   const unreadFilters = conversations.map((conversation) => ({
     conversationId: conversation._id,
     senderId: { $ne: req.user._id },
-    createdAt: { $gt: conversation.lastReadAt?.get(req.user.id) || new Date(0) }
+    createdAt: { $gt: new Date(Math.max(
+      conversation.lastReadAt?.get(req.user.id)?.getTime() || 0,
+      conversation.lastClearedAt?.get(req.user.id)?.getTime() || 0
+    )) }
   }));
   const [latestMessages, unreadCounts] = conversationIds.length ? await Promise.all([
-    Conversation.aggregate([
-      { $match: { _id: { $in: conversationIds } } },
+    Message.aggregate([
+      { $match: { $or: visibleMessageFilters } },
+      { $sort: { conversationId: 1, createdAt: -1, _id: -1 } },
+      { $group: { _id: '$conversationId', latest: { $first: '$$ROOT' } } },
       {
-        $lookup: {
-          from: Message.collection.name,
-          let: { conversationId: '$_id' },
-          pipeline: [
-            { $match: { $expr: { $eq: ['$conversationId', '$$conversationId'] } } },
-            { $sort: { createdAt: -1, _id: -1 } },
-            { $limit: 1 },
-            { $project: { text: 1, attachments: 1, createdAt: 1, deletedAt: 1 } }
-          ],
-          as: 'latestMessage'
+        $project: {
+          _id: 1,
+          latestMessage: {
+            text: '$latest.text', attachments: '$latest.attachments',
+            createdAt: '$latest.createdAt', deletedAt: '$latest.deletedAt'
+          }
         }
-      },
-      { $project: { _id: 1, latestMessage: { $arrayElemAt: ['$latestMessage', 0] } } }
+      }
     ]),
     Message.aggregate([
       { $match: { $or: unreadFilters } },
@@ -290,20 +314,24 @@ api.get('/conversations', asyncHandler(async (req, res) => {
 }));
 
 api.get('/conversations/:id/messages', asyncHandler(async (req, res) => {
-  await requireMember(req.params.id, req.user._id);
+  const conversation = await requireMember(req.params.id, req.user._id);
   const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 30, 1), 100);
   const query = { conversationId: req.params.id };
+  const filters = [];
+  const clearedAt = conversation.lastClearedAt?.get(req.user.id);
+  if (clearedAt) filters.push({ createdAt: { $gt: clearedAt } });
   if (typeof req.query.beforeAt === 'string' && !Number.isNaN(Date.parse(req.query.beforeAt))) {
     const beforeAt = new Date(req.query.beforeAt);
     if (typeof req.query.beforeId === 'string' && /^[a-f\d]{24}$/i.test(req.query.beforeId)) {
-      query.$or = [
+      filters.push({ $or: [
         { createdAt: { $lt: beforeAt } },
         { createdAt: beforeAt, _id: { $lt: req.query.beforeId } }
-      ];
+      ] });
     } else {
-      query.createdAt = { $lt: beforeAt };
+      filters.push({ createdAt: { $lt: beforeAt } });
     }
   }
+  if (filters.length) query.$and = filters;
   const messages = await Message.find(query).sort({ createdAt: -1, _id: -1 }).limit(limit).select('conversationId senderId text attachments createdAt readBy deletedAt').populate('senderId', 'displayName username');
   return res.json({ messages: messages.reverse().map((message) => ({
     _id: String(message._id), conversationId: String(message.conversationId),
@@ -313,6 +341,15 @@ api.get('/conversations/:id/messages', asyncHandler(async (req, res) => {
     })),
     createdAt: message.createdAt, readBy: message.readBy.map(String), deleted: Boolean(message.deletedAt)
   })), hasMore: messages.length === limit });
+}));
+
+api.post('/conversations/:id/clear', asyncHandler(async (req, res) => {
+  const conversation = await requireMember(req.params.id, req.user._id);
+  const clearedAt = new Date();
+  conversation.lastClearedAt.set(req.user.id, clearedAt);
+  conversation.lastReadAt.set(req.user.id, clearedAt);
+  await conversation.save();
+  return res.json({ clearedAt });
 }));
 
 api.delete('/conversations/:id/messages/:messageId', asyncHandler(async (req, res) => {

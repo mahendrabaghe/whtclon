@@ -1,5 +1,5 @@
 import { Server } from 'socket.io';
-import { verifySocketToken } from './auth.js';
+import { getSessionToken, verifySocketToken } from './auth.js';
 import { config } from './config.js';
 import { Conversation, Message } from './models.js';
 import { idString, requireMember } from './security.js';
@@ -55,14 +55,15 @@ export function broadcastConversationMessage(conversationId, message) {
 
 export function configureSocket(server) {
   const io = new Server(server, {
-    cors: { origin: config.origins, methods: ['GET', 'POST'] },
+    cors: { origin: config.origins, methods: ['GET', 'POST'], credentials: true },
     maxHttpBufferSize: 64 * 1024
   });
   socketServer = io;
 
   io.use(async (socket, next) => {
     try {
-      const token = socket.handshake.auth?.token;
+      const token = socket.handshake.auth?.token ||
+        getSessionToken(socket.handshake.headers.cookie);
       if (typeof token !== 'string') return next(new Error('Authentication required.'));
       const user = await verifySocketToken(token);
       if (!user) return next(new Error('Account no longer exists.'));

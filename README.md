@@ -4,7 +4,7 @@ ConnectX is a small, full-stack, one-to-one chat and WebRTC calling application.
 
 ## Implemented
 
-- Email/password registration and email-or-username login (bcrypt hashes, signed JWTs in persistent HttpOnly cookies; bearer-token clients remain supported)
+- Email/password registration and email-or-username login (bcrypt hashes, signed JWTs in HttpOnly cookies and tab-scoped browser bearer sessions)
 - Private one-to-one invitations with random 256-bit tokens stored as SHA-256 hashes, expiry, and creator revocation
 - Authenticated conversation membership checks for REST and Socket.IO actions
 - Persistent text messages, history pagination, typing indicators, unread counts, read receipts, and author-only message deletion
@@ -36,7 +36,7 @@ Requirements: Node.js 20+ and a MongoDB database.
 `npm run dev` starts the server with Node's watch mode. `npm run check` checks the JavaScript syntax.
 The build step copies the Socket.IO browser client and its license into `public/vendor/`, so the frontend does not rely on a third-party script CDN.
 
-The browser stores the signed session JWT in an HttpOnly cookie whose expiry matches the JWT (seven days by default). It is Secure and SameSite=None over HTTPS; local HTTP development uses SameSite=Lax. There is no refresh-token endpoint, so the user must sign in again after the configured JWT expiry. Existing bearer-token clients remain supported.
+The server sets a signed session JWT in an HttpOnly cookie whose expiry matches the JWT (seven days by default). It is Secure and SameSite=None over HTTPS; local HTTP development uses SameSite=Lax. The browser also keeps the returned bearer token in `sessionStorage` for the current tab and sends it on API and Socket.IO requests. This lets cross-origin deployments continue working in browsers such as iOS Safari that block third-party cookies; the cookie remains available for same-origin and other cookie-capable clients. There is no refresh-token endpoint, so the user must sign in again after the configured JWT expiry.
 
 For Android WebView packaging, load ConnectX over HTTPS and do not clear WebView cookies when the app closes. If the APK loads its frontend from a different site than the API, the WebView must allow third-party cookies; hosting the frontend and API on the same site avoids that dependency. This repository contains no Android wrapper source, so native WebView settings must be checked in the APK builder/wrapper.
 
@@ -73,7 +73,7 @@ STUN can establish many direct peer connections, but cannot guarantee calls thro
 ## Security and current limitations
 
 - Invitation tokens grant access only through the authenticated join endpoint and are checked for expiration, revocation, and conversation capacity on the server. Never share an invite link publicly.
-- JWTs are not logged or put in URLs. Browser sessions use HttpOnly cookies; sign out clears the cookie and sets a non-secret local sign-out marker so an offline logout will not silently restore the prior session on this device.
+- JWTs are not logged or put in URLs. The server sets an HttpOnly cookie, and the browser keeps the bearer token in `sessionStorage` for the active tab; sign out clears the cookie and token and sets a non-secret local sign-out marker so an offline logout will not silently restore the prior session on this device.
 - The authenticated REST API is protected by JWT. Conversation reads, message sends/deletes, typing, calls, and signaling all validate membership server-side.
 - Calls require a secure context (HTTPS, or localhost) and user permission for microphone/camera. STUN-only connectivity is best-effort.
 - Message history returns the newest page first; older pages are fetched with a `before` cursor. Accounts are registered with an email and password and can sign in with either their email or username.

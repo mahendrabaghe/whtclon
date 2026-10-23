@@ -76,6 +76,12 @@ test('login accepts either email or username with the account password', async (
     assert.equal(sessionResponse.status, 200);
     assert.equal((await sessionResponse.json()).user.username, user.username);
 
+    const bearerResponse = await fetch(`http://127.0.0.1:${address.port}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${data.token}` }
+    });
+    assert.equal(bearerResponse.status, 200);
+    assert.equal((await bearerResponse.json()).user.username, user.username);
+
     const logoutResponse = await fetch(`http://127.0.0.1:${address.port}/api/auth/logout`, {
       method: 'POST',
       headers: { Cookie: cookie, 'X-ConnectX-Request': '1' }

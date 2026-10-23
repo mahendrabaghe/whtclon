@@ -357,9 +357,12 @@ function renderAuth(register = false) {
       const result = await request(`/auth/${register ? 'register' : 'login'}`, {
         method: 'POST', body: JSON.stringify(body)
       });
+      if (typeof result.token !== 'string' || !result.token || !result.user) {
+        throw new Error('The server did not return a valid session. Please try again.');
+      }
       state.user = result.user;
-      state.token = null;
-      sessionStorage.removeItem(tokenKey);
+      state.token = result.token;
+      sessionStorage.setItem(tokenKey, result.token);
       localStorage.removeItem(loggedOutKey);
       notify(register ? 'Your account is ready.' : 'Signed in successfully.');
       void boot();
@@ -1782,8 +1785,6 @@ async function startApp() {
       const data = await request('/auth/me');
       state.user = data.user;
     }
-    state.token = null;
-    sessionStorage.removeItem(tokenKey);
     localStorage.removeItem(loggedOutKey);
     const conversationsPromise = refreshConversations();
     void connectSocket();

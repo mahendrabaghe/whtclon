@@ -12,30 +12,27 @@ const [{ v2: cloudinary }, uploads] = await Promise.all([
   import('../server/uploads.js')
 ]);
 
-test('attachment and profile lookups use Cloudinary callbacks and handle missing pending assets', async (t) => {
+test('attachment and profile lookups use Cloudinary promises and handle missing pending assets', async (t) => {
   const originalResource = cloudinary.api.resource;
   const originalRename = cloudinary.uploader.rename;
   const lookups = [];
   const renames = [];
-  cloudinary.api.resource = (publicId, callback, options) => {
-    lookups.push([publicId, callback, options]);
+  cloudinary.api.resource = async (publicId, options) => {
+    lookups.push([publicId, options]);
     if (publicId.startsWith('pending_chat_')) {
-      const missing = Object.assign(new Error('Not found'), { http_code: 404 });
-      queueMicrotask(() => callback(missing));
-      return;
+      throw Object.assign(new Error('Not found'), { http_code: 404 });
     }
     const profileImage = options.resource_type === 'image';
-    const result = {
+    return {
       bytes: profileImage ? 4 : 3,
       format: profileImage ? 'png' : 'pdf',
       resource_type: options.resource_type,
       type: 'authenticated',
       context: { custom: { content_type: profileImage ? 'image/png' : 'application/pdf' } }
     };
-    queueMicrotask(() => callback(null, result));
   };
-  cloudinary.uploader.rename = async (...args) => {
-    renames.push(args);
+  cloudinary.uploader.rename = async (fromPublicId, toPublicId, options) => {
+    renames.push([fromPublicId, toPublicId, options]);
     return {};
   };
   t.after(() => {
@@ -61,14 +58,12 @@ test('attachment and profile lookups use Cloudinary callbacks and handle missing
   });
   assert.equal(avatarKey, `image/avatar_${userId}_${attachmentId}`);
   assert.equal(lookups.length, 3);
-  for (const [, callback, options] of lookups) {
-    assert.equal(typeof callback, 'function');
+  for (const [, options] of lookups) {
     assert.equal(options.type, 'authenticated');
   }
-  assert.equal(lookups[0][2].resource_type, 'raw');
-  assert.equal(lookups[1][2].resource_type, 'raw');
-  assert.equal(lookups[2][2].resource_type, 'image');
+  assert.equal(lookups[0][1].resource_type, 'raw');
+  assert.equal(lookups[1][1].resource_type, 'raw');
+  assert.equal(lookups[2][1].resource_type, 'image');
   assert.equal(renames.length, 1);
-  assert.equal(renames[0][2], undefined);
-  assert.equal(renames[0][3].type, 'authenticated');
+  assert.equal(renames[0][2].type, 'authenticated');
 });

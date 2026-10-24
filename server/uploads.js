@@ -110,7 +110,7 @@ export async function completeProfileImageUpload({ key, userId, contentType, siz
   }
   await verifyAsset(asset, { contentType, size });
   const storedKey = makeKey('image', `avatar_${userId}_${match[1]}`);
-  await cloudinary.uploader.rename(asset.publicId, assetFromKey(storedKey).publicId, undefined, {
+  await cloudinary.uploader.rename(asset.publicId, assetFromKey(storedKey).publicId, {
     resource_type: 'image', type: 'authenticated', to_type: 'authenticated',
     overwrite: false, invalidate: true
   });
@@ -127,13 +127,8 @@ function attachmentKey({ conversationId, userId, attachmentId, contentType, pend
 
 async function findAsset({ resourceType, publicId }) {
   try {
-    return await new Promise((resolve, reject) => {
-      cloudinary.api.resource(publicId, (error, result) => {
-        if (error) reject(error);
-        else resolve(result);
-      }, {
-        resource_type: resourceType, type: 'authenticated'
-      });
+    return await cloudinary.api.resource(publicId, {
+      resource_type: resourceType, type: 'authenticated'
     });
   } catch (error) {
     if (error.http_code === 404) return null;
@@ -173,7 +168,7 @@ export async function storeUploadedAttachment({ conversationId, userId, attachme
   if (pendingResult) {
     validateAsset(pendingResult, { resourceType: pending.resourceType, contentType, size });
     try {
-      await cloudinary.uploader.rename(pending.publicId, stored.publicId, undefined, {
+      await cloudinary.uploader.rename(pending.publicId, stored.publicId, {
         resource_type: pending.resourceType, type: 'authenticated', to_type: 'authenticated',
         overwrite: false, invalidate: true
       });
